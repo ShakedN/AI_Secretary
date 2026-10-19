@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>בדיקת שיחה</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2330; --muted:#6b7280; --ai:#e8f0fe; --me:#e7f6ec; --accent:#2563eb; --danger:#dc2626; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui, "Segoe UI", Arial, sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:16px; }
+  h1 { font-size:22px; margin:8px 0 4px; }
+  .sub { color:var(--muted); font-size:14px; margin-bottom:12px; }
+  .card { background:var(--card); border-radius:12px; padding:14px; box-shadow:0 1px 3px rgba(0,0,0,.08); margin-bottom:12px; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:end; }
+  label { display:flex; flex-direction:column; font-size:13px; color:var(--muted); gap:4px; }
+  input, select { font:inherit; padding:7px 9px; border:1px solid #d1d5db; border-radius:8px; min-width:0; }
+  select { max-width:280px; }
+  button { font:inherit; padding:8px 16px; border-radius:8px; border:0; cursor:pointer; background:var(--accent); color:#fff; }
+  button.secondary { background:#e5e7eb; color:var(--ink); }
+  button.danger { background:var(--danger); }
+  button:disabled { opacity:.45; cursor:default; }
+  #status { font-weight:600; min-height:24px; }
+  #log { display:flex; flex-direction:column; gap:8px; min-height:120px; }
+  .msg { padding:8px 12px; border-radius:12px; max-width:85%; white-space:pre-wrap; }
+  .ai { background:var(--ai); align-self:flex-start; }
+  .me { background:var(--me); align-self:flex-end; }
+  .interim { opacity:.55; font-style:italic; }
+  .meta { font-size:12px; color:var(--muted); margin-top:2px; }
+  .warn { color:var(--danger); font-size:14px; }
+  form { display:flex; gap:8px; margin-top:10px; }
+  form input { flex:1; }
+  table { border-collapse:collapse; width:100%; }
+  td { padding:5px 6px; border-bottom:1px solid #eee; vertical-align:top; }
+  td:first-child { color:var(--muted); white-space:nowrap; width:1%; }
+</style>
+</head>
+<body>
+<main>
+  <h1>בדיקת שיחה בקול</h1>
+  <div class="sub" id="sub">מדברים עם העוזרת דרך המיקרופון, בדיוק כמו בשיחת טלפון. בסוף השיחה נוצר סיכום ונשלח מייל.</div>
+
+  <div class="card">
+    <div class="row">
+      <label>מספר המתקשר (לבדיקה)<input id="from" value="0501234567" size="12"></label>
+      <label>קול<select id="voice"></select></label>
+      <label>שקט לפני שליחה<select id="pause"><option value="1">1 שנ'</option><option value="1.5" selected>1.5 שנ'</option><option value="2">2 שנ'</option><option value="3">3 שנ'</option></select></label>
+      <label>מהירות<select id="rate"><option>0.9</option><option selected>1</option><option>1.1</option><option>1.2</option></select></label>
+      <button id="call">📞 התקשרות</button>
+      <button id="interrupt" class="secondary" disabled>✋ קטיעה</button>
+      <button id="hangup" class="danger" disabled>ניתוק</button>
+      <button id="mictest" class="secondary">🎙️ בדיקת מיקרופון</button>
+    </div>
+    <div class="sub" style="margin:8px 0 0">בדיקת מיקרופון רק מתמללת את מה שאומרים — בלי AI — כדי לבדוק איך מזוהים שמות, מספרים ומונחים.</div>
+    <div id="warnings"></div>
+  </div>
+
+  <div class="card">
+    <div id="status">מוכן.</div>
+    <div id="log"></div>
+    <form id="typeForm">
+      <input id="typed" placeholder="אפשר גם להקליד במקום לדבר..." disabled>
+      <button id="send" disabled>שליחה</button>
+    </form>
+  </div>
+
+  <div class="card" id="resultCard" hidden>
+    <h2 style="font-size:18px;margin:0 0 8px">ההודעה לעורך הדין</h2>
+    <div id="result"></div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+let ws = null, callSid = null, assistant = "העוזרת", inCall = false;
+let recog = null, listening = false, micBlocked = false;
+let queue = [], speaking = false, gen = 0, spokenSoFar = "";
+let replyBuf = "", bubble = null, replyDone = true, endPending = false, sentAt = 0;
+
+// ── voices ──────────────────────────────────────────────────────────────
+function loadVoices() {
+  const all = speechSynthesis.getVoices();
+  const he = all.filter(v => v.lang && v.lang.toLowerCase().startsWith("he"));
+  // Natural/online voices (Edge) sound far better than the local ones.
+  he.sort((a, b) => /natural|online/i.test(b.name) - /natural|online/i.test(a.name));
+  const sel = $("voice"), prev = sel.value;
+  sel.innerHTML = "";
+  for (const v of he) sel.add(new Option(v.name, v.name));
+  if (prev && he.some(v => v.name === prev)) sel.value = prev;
+  const warn = [];
+  if (all.length && !he.length) warn.push("לא נמצא קול בעברית בדפדפן הזה. כדאי לפתוח את הדף ב-Microsoft Edge, שיש בו קולות עבריים טבעיים.");
+  if (!SR) warn.push("הדפדפן לא תומך בזיהוי דיבור — אפשר להקליד, או לפתוח ב-Chrome / Edge.");
+  $("warnings").innerHTML = warn.map(w => `<div class="warn">${w}</div>`).join("");
+}
+speechSynthesis.onvoiceschanged = loadVoices;
+loadVoices();
+
+// ── UI helpers ──────────────────────────────────────────────────────────
+function status(t) { $("status").textContent = t; }
+function addMsg(cls, text) {
+  const el = document.createElement("div");
+  el.className = "msg " + cls;
+  el.textContent = text;
+  $("log").appendChild(el);
+  el.scrollIntoView({ block: "end", behavior: "smooth" });
+  return el;
+}
+function addMeta(el, text) {
+  const m = document.createElement("div");
+  m.className = "meta";
+  m.textContent = text;
+  el.appendChild(m);
+}
+function setInCall(on) {
+  inCall = on;
+  $("call").disabled = on;
+  $("hangup").disabled = !on;
+  $("interrupt").disabled = !on;
+  $("typed").disabled = !on;
+  $("send").disabled = !on;
+  $("mictest").disabled = on;
+}
+
+// ── call lifecycle ──────────────────────────────────────────────────────
+$("call").onclick = async () => {
+  $("log").innerHTML = "";
+  $("resultCard").hidden = true;
+  endPending = false; replyDone = true; queue = []; replyBuf = ""; bubble = null;
+  const r = await fetch("/test/start", { method: "POST" });
+  if (!r.ok) { status("שגיאה בפתיחת השיחה (" + r.status + ")"); return; }
+  const d = await r.json();
+  callSid = d.call_sid; assistant = d.assistant_name;
+  if (!d.llm) { status("אין מפתח API ל-AI ב-.env — אי אפשר לדבר."); return; }
+  $("sub").textContent = `מודל: ${d.llm} · מייל בסוף השיחה: ${d.email || "לא מוגדר (רק סיכום בדף)"}`;
+
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/relay");
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: "setup", callSid, from: $("from").value.trim() || "anonymous" }));
+    setInCall(true);
+    addMsg("ai", d.greeting);
+    speak(d.greeting);
+  };
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === "text") onToken(m.token, m.last);
+    else if (m.type === "end") { endPending = true; maybeFinish(); }
+  };
+  ws.onclose = () => { if (inCall) callEnded(); };
+};
+
+$("hangup").onclick = () => hangup();
+
+function hangup() {
+  if (!inCall) return;
+  stopListening();
+  queue = []; gen++; speechSynthesis.cancel(); speaking = false;
+  callEnded();
+  if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+}
+
+function callEnded() {
+  setInCall(false);
+  stopListening();
+  status("השיחה הסתיימה — מסכמת ושולחת מייל...");
+  pollResult(0);
+}
+
+async function pollResult(tries) {
+  const r = await fetch("/test/result/" + callSid);
+  const d = r.ok ? await r.json() : { pending: true };
+  if (d.pending) {
+    if (tries < 30) return setTimeout(() => pollResult(tries + 1), 2000);
+    status("השיחה הסתיימה. לא נוצר סיכום (אולי לא נאמר כלום) — ראו את הלוג של השרת.");
+    return;
+  }
+  status(d.emailed_to ? "✅ הסיכום נשלח במייל ל: " + d.emailed_to : "✅ הסיכום מוכן (מייל לא נשלח — SMTP לא מוגדר ב-.env)");
+  showResult(d);
+}
+
+function showResult(d) {
+  const labels = {
+    caller_name: "שם", callback_phone: "טלפון לחזרה", lawyer_requested: "חיפש/ה את", topic: "נושא",
+    urgency: "דחיפות", existing_client: "לקוח קיים", callback_time: "זמן נוח לחזרה", summary: "סיכום",
+    next_step: "הצעד הבא", caller_mood: "מצב רוח", missing_info: "מה חסר", call_review: "הערכת השיחה",
+    duration_seconds: "משך (שניות)",
+  };
+  const rows = Object.entries(labels)
+    .filter(([k]) => d[k] !== null && d[k] !== undefined && d[k] !== "")
+    .map(([k, label]) => `<tr><td>${label}</td><td>${escapeHtml(String(d[k]))}</td></tr>`);
+  $("result").innerHTML = `<table>${rows.join("")}</table>`;
+  $("resultCard").hidden = false;
+  $("resultCard").scrollIntoView({ behavior: "smooth" });
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// ── assistant speech (streamed sentence by sentence) ──────────────────────
+function onToken(tok, last) {
+  if (!bubble) {
+    bubble = addMsg("ai", "");
+    spokenSoFar = "";
+    if (sentAt) { bubble.dataset.latency = ((performance.now() - sentAt) / 1000).toFixed(1); sentAt = 0; }
+  }
+  bubble.firstChild ? (bubble.firstChild.textContent += tok) : bubble.appendChild(document.createTextNode(tok));
+  replyBuf += tok;
+  let m;
+  while ((m = replyBuf.match(/^([\s\S]*?[.!?…])\s+/))) {
+    speak(m[1]);
+    replyBuf = replyBuf.slice(m[0].length);
+  }
+  if (last) {
+    if (replyBuf.trim()) speak(replyBuf.trim());
+    replyBuf = "";
+    if (bubble.dataset.latency) addMeta(bubble, `זמן עד המילה הראשונה: ${bubble.dataset.latency} שניות`);
+    bubble = null;
+    replyDone = true;
+    maybeListen();
+  } else {
+    replyDone = false;
+  }
+}
+
+function speak(text) {
+  if (!text) return;
+  stopListening();
+  queue.push(text);
+  pump();
+}
+
+function pump() {
+  if (speaking || !queue.length) return;
+  const text = queue.shift();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "he-IL";
+  u.rate = parseFloat($("rate").value);
+  const v = speechSynthesis.getVoices().find(v => v.name === $("voice").value);
+  if (v) u.voice = v;
+  const myGen = gen;
+  speaking = true;
+  status(`🔊 ${assistant} מדברת... (אפשר ללחוץ "קטיעה" ולדבר)`);
+  u.onend = u.onerror = () => {
+    if (myGen !== gen) return;  // cancelled by an interruption
+    speaking = false;
+    spokenSoFar += text + " ";
+    if (queue.length) pump();
+    else { maybeFinish(); maybeListen(); }
+  };
+  speechSynthesis.speak(u);
+}
+
+$("interrupt").onclick = () => interrupt();
+
+function interrupt() {
+  if (!speaking && !queue.length && replyDone) return;
+  queue = []; gen++; speechSynthesis.cancel(); speaking = false;
+  ws.send(JSON.stringify({ type: "interrupt", utteranceUntilInterrupt: spokenSoFar.trim() }));
+  if (bubble) addMeta(bubble, "[נקטע]");
+  bubble = null; replyBuf = ""; replyDone = true; endPending = false;
+  maybeListen();
+}
+
+function maybeFinish() {
+  if (endPending && !speaking && !queue.length) hangup();
+}
+
+// ── caller speech ─────────────────────────────────────────────────────────
+function maybeListen() {
+  if (inCall && replyDone && !speaking && !queue.length && !endPending) startListening();
+}
+
+// The browser's own end-of-speech detection cuts people off at the first
+// short pause. Instead we listen continuously and only send once the caller
+// has been quiet for the chosen pause length.
+let pendingText = "", pendingConf = 0, silenceTimer = null, interimEl = null, hasInterim = false;
+
+function pauseMs() { return parseFloat($("pause").value) * 1000; }
+
+function showPending(interim) {
+  const text = (pendingText + " " + (interim || "")).trim();
+  if (!text) return;
+  interimEl = interimEl || addMsg("me interim", "");
+  interimEl.textContent = text;
+}
+
+function armSilence() {
+  clearTimeout(silenceTimer);
+  silenceTimer = setTimeout(() => {
+    if (!pendingText.trim() && !hasInterim) return;
+    if (recog) { recog.submitted = true; recog.stop(); }  // stop() finalizes pending audio → onend sends
+    else submitPending();
+  }, pauseMs());
+}
+
+function submitPending() {
+  const text = pendingText.trim(), conf = pendingConf;
+  clearPending();
+  if (text) sendPrompt(text, conf);
+}
+
+function clearPending() {
+  clearTimeout(silenceTimer);
+  pendingText = ""; pendingConf = 0; hasInterim = false;
+  if (interimEl) { interimEl.remove(); interimEl = null; }
+}
+
+function startListening() {
+  if (!SR || micBlocked || listening || !inCall) {
+    if (inCall && (!SR || micBlocked)) status("✍️ תורך — הקלידו תשובה");
+    return;
+  }
+  const r = new SR();
+  r.lang = "he-IL";
+  r.interimResults = true;
+  r.continuous = true;
+
+  r.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const res = e.results[i];
+      if (res.isFinal) { pendingText += " " + res[0].transcript; pendingConf = res[0].confidence || pendingConf; }
+      else interim += res[0].transcript;
+    }
+    hasInterim = !!interim.trim();
+    showPending(interim);
+    armSilence();
+  };
+  r.onerror = (e) => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      micBlocked = true;
+      status("אין גישה למיקרופון — אשרו בדפדפן, או הקלידו.");
+    }
+  };
+  r.onend = () => {
+    if (recog === r) { recog = null; listening = false; }
+    if (r.aborted) return;
+    hasInterim = false;
+    const text = pendingText.trim();
+    if (r.submitted && text) {
+      submitPending();
+    } else {
+      // The browser ended on its own (long silence, timeout): keep what was
+      // said so far and keep listening.
+      maybeListen();
+      if (text) armSilence();
+    }
+  };
+  recog = r;
+  listening = true;
+  r.start();
+  status(`🎤 מקשיבה... דברו (שולחת אחרי ${$("pause").value} שניות של שקט)`);
+}
+
+function stopListening() {
+  if (recog) {
+    recog.aborted = true;
+    try { recog.abort(); } catch (_) {}
+    recog = null;
+  }
+  listening = false;
+  clearPending();
+}
+
+function confidenceNote(conf) {
+  return conf ? `🎤 זוהה מהדיבור · ביטחון ${Math.round(conf * 100)}%` : "🎤 זוהה מהדיבור";
+}
+
+function sendPrompt(text, conf) {
+  if (!inCall) return;
+  const el = addMsg("me", text);
+  if (conf !== undefined) addMeta(el, confidenceNote(conf));
+  replyDone = false;
+  sentAt = performance.now();
+  ws.send(JSON.stringify({ type: "prompt", voicePrompt: text, lang: "he-IL", last: true }));
+  status("⏳ חושבת...");
+}
+
+// ── mic test: transcription only, no AI ─────────────────────────────────────
+let micTest = null;
+$("mictest").onclick = () => {
+  if (micTest) { micTest.stopRequested = true; micTest.stop(); return; }
+  if (!SR) { status("הדפדפן לא תומך בזיהוי דיבור — נסו Chrome או Edge."); return; }
+  $("log").innerHTML = "";
+  $("resultCard").hidden = true;
+  const r = new SR();
+  r.lang = "he-IL";
+  r.interimResults = true;
+  r.continuous = true;
+  r.maxAlternatives = 3;
+  let interimEl = null;
+  r.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const res = e.results[i];
+      if (res.isFinal) {
+        if (interimEl) { interimEl.remove(); interimEl = null; }
+        const el = addMsg("me", res[0].transcript.trim());
+        addMeta(el, confidenceNote(res[0].confidence));
+        const alts = Array.from(res).slice(1).map(a => a.transcript.trim()).filter(Boolean);
+        if (alts.length) addMeta(el, "חלופות: " + alts.join(" | "));
+      } else interim += res[0].transcript;
+    }
+    if (interim) {
+      interimEl = interimEl || addMsg("me interim", "");
+      interimEl.textContent = interim;
+    }
+  };
+  r.onerror = (e) => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") status("אין גישה למיקרופון — אשרו בדפדפן.");
+  };
+  r.onend = () => {
+    if (interimEl) interimEl.remove();
+    if (!r.stopRequested) { try { r.start(); return; } catch (_) {} }  // browser stops after silence
+    micTest = null;
+    $("mictest").textContent = "🎙️ בדיקת מיקרופון";
+    $("call").disabled = false;
+    status("בדיקת המיקרופון הסתיימה.");
+  };
+  micTest = r;
+  r.start();
+  $("mictest").textContent = "⏹️ עצירת בדיקה";
+  $("call").disabled = true;
+  status("🎙️ מקשיבה — דברו, והטקסט שזוהה יופיע כאן. נסו שם מלא ומספר טלפון.");
+};
+
+$("typeForm").onsubmit = (e) => {
+  e.preventDefault();
+  const text = $("typed").value.trim();
+  if (!text || !inCall) return;
+  $("typed").value = "";
+  if (speaking || queue.length) interrupt();
+  stopListening();
+  sendPrompt(text);
+};
+</script>
+</body>
+</html>

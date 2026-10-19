@@ -1,0 +1,21 @@
+# Office profile — edit with the real details.
+office_name: "כהן ושות' עורכי דין"
+assistant_name: "נועה"
+general_email: "office@example.com"   # gets every message (and any message for an unknown lawyer)
+cc_general: true                       # also CC general_email on messages addressed to a specific lawyer
+
+lawyers:
+  - name: "עו\"ד דנה כהן"
+    aliases: ["דנה", "כהן"]
+    email: "dana@example.com"
+  - name: "עו\"ד יוסי לוי"
+    aliases: ["יוסי", "לוי"]
+    email: "yossi@example.com"
+
+practice_areas: ["דיני משפחה", "מקרקעין", "צוואות וירושות"]
+
+# Optional: overrides the default opening line.
+# welcome_greeting: "שלום, הגעתם למשרד כהן ושות'..."
+
+# Optional: anything office-specific she should know (hours, address, etc.).
+extra_instructions: ""

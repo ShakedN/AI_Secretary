@@ -1,0 +1,36 @@
+# Render Blueprint — Dashboard → New → Blueprint → pick this repo.
+# Secrets (sync: false) are asked for once in the dashboard, never stored in git.
+services:
+  - type: web
+    name: law-office-secretary
+    runtime: docker
+    plan: starter          # always on; the free plan sleeps and would miss calls
+    region: frankfurt      # closest Render region to Israel
+    healthCheckPath: /health
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TTS_PROVIDER
+        value: Google
+      - key: TTS_VOICE
+        value: he-IL-Wavenet-A
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: EMAIL_TO_OVERRIDE
+        sync: false
