@@ -50,6 +50,7 @@ def test_finish_call_saves_to_db(office, tmp_path, monkeypatch):
 
 
 def test_incoming_webhook_returns_conversation_relay(monkeypatch):
+    monkeypatch.setattr(settings, "VOICE_MODE", "relay")
     monkeypatch.setattr(settings, "TWILIO_AUTH_TOKEN", "")
     monkeypatch.setattr(settings, "PUBLIC_BASE_URL", "https://example.ngrok.app")
     with TestClient(main.app) as http:
@@ -138,3 +139,12 @@ def test_test_page_flow(office, tmp_path, monkeypatch):
         asyncio.run(main.finish_call(office, FakeLLM(summary=SUMMARY), sid, conv))
         result = http.get(f"/test/result/{sid}").json()
         assert result["caller_name"] == "משה" and result["duration_seconds"] >= 0
+
+
+def test_voice_samples_twiml_lists_every_hebrew_voice(monkeypatch):
+    monkeypatch.setattr(settings, "TWILIO_AUTH_TOKEN", "")
+    with TestClient(main.app) as http:
+        xml = http.post("/voice/samples").text
+    for voice in main.SAMPLE_VOICES:
+        assert f'voice="Google.{voice}"' in xml
+    assert "<Hangup" in xml

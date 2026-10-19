@@ -1,6 +1,7 @@
 """Environment settings + the office profile (config.yaml)."""
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,11 +39,17 @@ PUBLIC_BASE_URL: str = (
 
 # ConversationRelay speech settings — Hebrew voice quality differs a lot
 # between providers, so these are meant to be tried and tuned on real calls.
+# How calls are connected:
+#   "gather" — Twilio <Gather> speech recognition (supports Hebrew) + <Say>, turn by turn.
+#   "relay"  — ConversationRelay (streaming, lower latency) — but Twilio rejects Hebrew
+#              speech recognition there (error 64101), so it only works for other languages.
+VOICE_MODE: str = os.getenv("VOICE_MODE", "gather").strip().lower()
 LANGUAGE: str = os.getenv("LANGUAGE", "he-IL")
 TTS_PROVIDER: str = os.getenv("TTS_PROVIDER", "Google")
-TTS_VOICE: str = os.getenv("TTS_VOICE", "he-IL-Wavenet-A")
+TTS_VOICE: str = os.getenv("TTS_VOICE", "he-IL-Wavenet-C")
 TRANSCRIPTION_PROVIDER: str = os.getenv("TRANSCRIPTION_PROVIDER", "Google")
-SPEECH_MODEL: str = os.getenv("SPEECH_MODEL", "")
+# Google's default "telephony" model has no Hebrew (Twilio error 64101), so use "long".
+SPEECH_MODEL: str = os.getenv("SPEECH_MODEL", "long")
 
 SMTP_HOST: str = os.getenv("SMTP_HOST", "")
 SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
@@ -57,7 +64,10 @@ EMAIL_TO_OVERRIDE: str = os.getenv("EMAIL_TO_OVERRIDE", "")
 TEST_PAGE: bool = os.getenv("TEST_PAGE", "").strip().lower() in ("1", "true", "yes")
 
 DB_PATH: Path = ROOT / os.getenv("DB_PATH", "data/calls.db")
+# The real office details (lawyers' names and emails) live in config.yaml,
+# which is git-ignored; config.example.yaml is the committed template.
 OFFICE_CONFIG_PATH: Path = ROOT / os.getenv("OFFICE_CONFIG", "config.yaml")
+EXAMPLE_OFFICE_CONFIG_PATH: Path = ROOT / "config.example.yaml"
 
 
 @dataclass
@@ -96,6 +106,12 @@ class Office:
 
 
 def load_office(path: Path = OFFICE_CONFIG_PATH) -> Office:
+    if not path.exists():
+        logging.getLogger(__name__).warning(
+            "%s not found — using the EXAMPLE office details from %s. "
+            "Copy it to config.yaml and fill in the real office.", path.name, EXAMPLE_OFFICE_CONFIG_PATH.name,
+        )
+        path = EXAMPLE_OFFICE_CONFIG_PATH
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return Office(
         name=data["office_name"],
@@ -107,3 +123,9 @@ def load_office(path: Path = OFFICE_CONFIG_PATH) -> Office:
         welcome_greeting=data.get("welcome_greeting", ""),
         cc_general=data.get("cc_general", True),
     )
+
+
+def say_voice() -> str:
+    """TTS_PROVIDER/TTS_VOICE as a <Say> voice name, e.g. "Google.he-IL-Wavenet-C"."""
+    prefix = {"google": "Google", "amazon": "Polly", "polly": "Polly"}.get(TTS_PROVIDER.lower(), TTS_PROVIDER)
+    return f"{prefix}.{TTS_VOICE}"

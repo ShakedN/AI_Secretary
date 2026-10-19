@@ -1,11 +1,15 @@
-"""FastAPI app: Twilio webhooks + the ConversationRelay WebSocket.
+"""FastAPI app: Twilio webhooks for the AI secretary.
 
-Call flow:
+Call flow (VOICE_MODE=gather, the default — Hebrew works here):
   office line, no answer → forwarded to our Twilio number
-  → POST /voice/incoming  (TwiML: <Connect><ConversationRelay url=wss://…/relay>)
-  → WS /relay             (live conversation with the LLM — Gemini or Claude)
+  → POST /voice/incoming  (TwiML: <Gather speech><Say greeting/></Gather>)
+  → POST /voice/gather    (each caller utterance → LLM → <Gather><Say reply/></Gather>)
   → call ends             → summary → SQLite + email to the lawyer
-  → POST /voice/after     (TwiML: <Hangup/>)
+  → POST /voice/status    (Twilio status callback: catches callers who hang up)
+
+VOICE_MODE=relay uses ConversationRelay instead (POST /voice/incoming →
+WS /relay → POST /voice/after) — streaming and faster, but Twilio doesn't
+support Hebrew speech recognition there.
 """
 from __future__ import annotations
 
@@ -19,14 +23,14 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response
 from twilio.request_validator import RequestValidator
-from twilio.twiml.voice_response import Connect, VoiceResponse
+from twilio.twiml.voice_response import Connect, Gather, Say, VoiceResponse
 
 from . import db, notify, settings
 from .agent.conversation import Conversation
 from .agent.prompt import now_in_israel
 from .agent.summary import CallSummary, summarize
 from .llm import LLM, make_llm
-from .relay import RelaySession
+from .relay import RelaySession, caller_number
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("secretary")
@@ -95,12 +99,14 @@ def build_connect_twiml(office: settings.Office) -> VoiceResponse:
 async def voice_incoming(request: Request):
     form = await _check_twilio_signature(request)
     call_sid = form.get("CallSid", "")
+    logger.info("incoming call %s from %s (%s)", call_sid, form.get("From"), settings.VOICE_MODE)
+    if settings.VOICE_MODE == "gather":
+        return _twiml(_start_gather_call(request.app, call_sid, form.get("From")))
     now = time.time()
     for sid, seen in list(_expected_calls.items()):
         if now - seen > _EXPECTED_TTL:
             del _expected_calls[sid]
     _expected_calls[call_sid] = now
-    logger.info("incoming call %s from %s", call_sid, form.get("From"))
     return _twiml(build_connect_twiml(request.app.state.office))
 
 
@@ -110,6 +116,136 @@ async def voice_after(request: Request):
     vr = VoiceResponse()
     vr.hangup()
     return _twiml(vr)
+
+
+# ── Gather mode: Twilio recognizes the speech, we answer turn by turn ───────
+
+_gather_calls: dict[str, Conversation] = {}
+_gather_silences: dict[str, int] = {}
+_MAX_SILENCES = 2        # "hello? are you there?" twice, then say goodbye
+_MAX_CALLER_TURNS = 25   # safety net against a call that never ends
+# Below this, Twilio's recognition is often wrong (numbers especially), so the
+# assistant is told to double-check instead of confidently repeating garbage.
+_LOW_CONFIDENCE = 0.6
+
+
+def _say(text: str) -> Say:
+    return Say(text, language=settings.LANGUAGE, voice=settings.say_voice())
+
+
+def gather_twiml(text: str) -> VoiceResponse:
+    """Speak `text` and listen for the caller's answer (they can talk over it)."""
+    vr = VoiceResponse()
+    gather = Gather(
+        # Keypad too: phone numbers are much more reliable typed than spoken.
+        input="dtmf speech",
+        finish_on_key="#",
+        action=settings.PUBLIC_BASE_URL + "/voice/gather",
+        method="POST",
+        language=settings.LANGUAGE,
+        speech_timeout="auto",
+        timeout=6,
+        action_on_empty_result=True,
+    )
+    gather.append(_say(text))
+    vr.append(gather)
+    return vr
+
+
+def goodbye_twiml(text: str) -> VoiceResponse:
+    vr = VoiceResponse()
+    vr.append(_say(text))
+    vr.hangup()
+    return vr
+
+
+def _start_gather_call(app: FastAPI, call_sid: str, from_number: str | None) -> VoiceResponse:
+    office = app.state.office
+    _gather_calls[call_sid] = Conversation(office=office, llm=app.state.llm, caller_number=caller_number(from_number))
+    _gather_silences[call_sid] = 0
+    return gather_twiml(office.greeting())
+
+
+def _end_gather_call(app: FastAPI, call_sid: str) -> None:
+    """Hand the finished conversation to finish_call — exactly once per call."""
+    _gather_silences.pop(call_sid, None)
+    conv = _gather_calls.pop(call_sid, None)
+    if conv is not None:
+        task = asyncio.create_task(finish_call(app.state.office, app.state.llm, call_sid, conv))
+        _background.add(task)
+        task.add_done_callback(_background.discard)
+
+
+@app.post("/voice/gather")
+async def voice_gather(request: Request):
+    form = await _check_twilio_signature(request)
+    call_sid = form.get("CallSid", "")
+    speech = (form.get("SpeechResult") or "").strip()
+    digits = (form.get("Digits") or "").strip("#* ")
+    if digits:
+        speech = f"(הקשתי במקלדת) {' '.join(digits)}"
+    else:
+        try:
+            if speech and float(form.get("Confidence") or 1) < _LOW_CONFIDENCE:
+                speech += " [זיהוי לא בטוח]"
+        except ValueError:
+            pass
+    conv = _gather_calls.get(call_sid)
+    if conv is None:  # e.g. the server restarted mid-call
+        return _twiml(goodbye_twiml("סליחה, הייתה תקלה בקו. אנא התקשרו שוב."))
+
+    if not speech:
+        _gather_silences[call_sid] = _gather_silences.get(call_sid, 0) + 1
+        if _gather_silences[call_sid] > _MAX_SILENCES:
+            _end_gather_call(request.app, call_sid)
+            return _twiml(goodbye_twiml("לא שומעים אתכם. אפשר להתקשר שוב בכל עת. להתראות."))
+        return _twiml(gather_twiml("הלו? אני כאן, אפשר לדבר."))
+
+    _gather_silences[call_sid] = 0
+    logger.info("call %s caller (%s): %s", call_sid, form.get("Confidence"), speech)
+    conv.add_caller(speech)
+    reply = "".join([token async for token in conv.reply()])
+    turns = sum(t.role == "caller" for t in conv.turns)
+    logger.info("call %s assistant%s: %s", call_sid, " (hanging up)" if conv.ended else "", reply)
+
+    if conv.ended or turns >= _MAX_CALLER_TURNS:
+        _end_gather_call(request.app, call_sid)
+        return _twiml(goodbye_twiml(reply))
+    return _twiml(gather_twiml(reply))
+
+
+@app.post("/voice/status")
+async def voice_status(request: Request):
+    """Twilio's call status callback — the only way we learn the caller hung up."""
+    form = await _check_twilio_signature(request)
+    if form.get("CallStatus") in ("completed", "busy", "failed", "no-answer", "canceled"):
+        _end_gather_call(request.app, form.get("CallSid", ""))
+    return {"ok": True}
+
+
+# ── Voice samples: call the number and hear every Hebrew voice in turn ─────
+# Point the Twilio number at /voice/samples (scripts/twilio_number.py) to pick
+# a voice by ear on a real phone line, then put the winner in TTS_VOICE.
+
+# Only WaveNet: the Standard voices are the robotic-sounding ones.
+SAMPLE_VOICES = ["he-IL-Wavenet-A", "he-IL-Wavenet-B", "he-IL-Wavenet-C", "he-IL-Wavenet-D"]
+_SAMPLE_TEXT = "שלום, הגעתם למשרד עורכי דין. כרגע אין מי שיענה, אבל אשמח לרשום את הפנייה ולדאוג שיחזרו אליכם. במה מדובר?"
+
+
+def build_samples_twiml() -> VoiceResponse:
+    vr = VoiceResponse()
+    for i, voice in enumerate(SAMPLE_VOICES, 1):
+        vr.say(f"קול מספר {i}. {_SAMPLE_TEXT}", language="he-IL", voice=f"Google.{voice}")
+        vr.pause(length=1)
+    vr.say("זה הכל. תודה!", language="he-IL", voice=f"Google.{SAMPLE_VOICES[-1]}")
+    vr.hangup()
+    return vr
+
+
+@app.post("/voice/samples")
+async def voice_samples(request: Request):
+    await _check_twilio_signature(request)
+    return _twiml(build_samples_twiml())
 
 
 @app.get("/health")

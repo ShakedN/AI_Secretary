@@ -1,4 +1,4 @@
-# Office profile — edit with the real details.
+# Example office profile. Copy to config.yaml (git-ignored) and put the real details there.
 office_name: "כהן ושות' עורכי דין"
 assistant_name: "נועה"
 general_email: "office@example.com"   # gets every message (and any message for an unknown lawyer)

@@ -16,6 +16,15 @@ FALLBACK_REPLY = "סליחה, לא שמעתי טוב. אפשר לחזור על �
 ERROR_REPLY = "סליחה, יש לי תקלה קטנה. תוכלו להשאיר שם ומספר טלפון, ונחזור אליכם בהקדם?"
 DEFAULT_GOODBYE = "תודה רבה, ההודעה הועברה. יום טוב!"
 
+# A silent hang-up (end_call with no words) is only trusted once someone on
+# the call already said goodbye — otherwise it's the model misfiring, and
+# cutting a client off mid-message is the worst thing the secretary can do.
+_FAREWELLS = ("להתראות", "ביי", "זהו", "זה הכל", "יום טוב", "המשך יום", "ערב טוב", "שבוע טוב", "שבת שלום", "תודה רבה")
+
+
+def _says_goodbye(text: str) -> bool:
+    return any(word in text for word in _FAREWELLS)
+
 
 @dataclass
 class Turn:
@@ -74,6 +83,11 @@ class Conversation:
 
     # ── generation ───────────────────────────────────────────────────────────
 
+    def _goodbye_already_said(self) -> bool:
+        last_caller = next((t.text for t in reversed(self.turns) if t.role == "caller"), "")
+        last_assistant = next((t.text for t in reversed(self.turns) if t.role == "assistant"), "")
+        return _says_goodbye(last_caller) or _says_goodbye(last_assistant)
+
     async def reply(self) -> AsyncIterator[str]:
         """Stream the next spoken reply. Records it in history once fully
         generated; if the caller interrupts, the task is cancelled and
@@ -83,12 +97,18 @@ class Conversation:
         try:
             if self.llm is None:
                 raise RuntimeError("no LLM configured")
-            async for item in self.llm.stream(self.system_prompt, self.messages()):
-                if item is END_CALL:
-                    hang_up = True
-                else:
-                    parts.append(item)
-                    yield item
+            for attempt in range(2):
+                async for item in self.llm.stream(self.system_prompt, self.messages()):
+                    if item is END_CALL:
+                        hang_up = True
+                    else:
+                        parts.append(item)
+                        yield item
+                if hang_up and not "".join(parts).strip() and not self._goodbye_already_said():
+                    logger.warning("ignoring a silent hang-up mid-conversation; asking again")
+                    hang_up = False
+                    continue
+                break
         except Exception:
             if parts:
                 raise

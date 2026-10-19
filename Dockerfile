@@ -9,7 +9,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-COPY config.yaml .
+# Only the template goes into the image; mount the real config.yaml at run time:
+#   docker run -v /path/to/config.yaml:/app/config.yaml ...
+COPY config.example.yaml .
 
 # Mount a persistent disk here so the call log survives redeploys.
 ENV DB_PATH=/data/calls.db

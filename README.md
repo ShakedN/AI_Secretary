@@ -7,10 +7,19 @@ in natural Hebrew, takes a message, and emails it to the lawyer they asked for.
 
 ```
 office line, no answer after N rings ──forward──▶ Twilio number
-  POST /voice/incoming   → TwiML <ConversationRelay> (Twilio does speech-to-text, TTS, barge-in)
-  WS   /relay            → live conversation: the LLM streams each reply token by token
+  POST /voice/incoming   → <Gather> speech recognition (he-IL) + <Say> greeting
+  POST /voice/gather     → each caller utterance → the LLM → <Say> reply, listen again
+  POST /voice/status     → call ended (also when the caller just hangs up)
   call ends              → the LLM writes a structured summary → SQLite + email to the lawyer
 ```
+
+Calls use Twilio `<Gather>` (`VOICE_MODE=gather`) because ConversationRelay, Twilio's streaming
+alternative, rejects Hebrew speech recognition (error 64101). The ConversationRelay path
+(`VOICE_MODE=relay`, `app/relay.py`) is kept for languages it supports.
+
+Phone numbers are the hardest thing to recognize from speech, so the assistant offers to call back
+the caller ID, is told when recognition confidence is low, and callers can type a number on the
+keypad followed by `#`.
 
 The LLM is Gemini or Claude, chosen with `LLM_PROVIDER` in `.env` (`app/llm.py`).
 **Gemini's free tier lets Google use the data you send**, so use it only for testing with
@@ -19,10 +28,12 @@ made-up details. Real client calls need a paid tier (Gemini paid or Claude).
 - `app/agent/prompt.py`: who the assistant is and what the lawyer needs afterwards. It is short on
   purpose, with no script and no question order, so the model runs the conversation itself.
 - `app/agent/conversation.py`: conversation history, streaming replies, interruptions, the `end_call` tool.
-- `app/relay.py`: the ConversationRelay WebSocket protocol.
+- `app/main.py`: Twilio webhooks (the Gather call flow) and the test page.
+- `app/relay.py`: the ConversationRelay WebSocket protocol (`VOICE_MODE=relay`).
 - `app/agent/summary.py`: transcript → structured message (name, number, lawyer, topic, urgency…).
 - `app/notify.py`, `app/db.py`: email and the call log.
-- `config.yaml`: office name, lawyers and emails, practice areas.
+- `config.yaml`: office name, lawyers and emails, practice areas. It is git-ignored;
+  `config.example.yaml` is the template.
 
 ## Setup
 
@@ -35,7 +46,8 @@ cp .env.example .env          # fill in the keys
 Get a Gemini key at https://aistudio.google.com/apikey and put it in `GEMINI_API_KEY`.
 To switch to Claude later, set `LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY`.
 
-Edit `config.yaml` with the real office details.
+Copy `config.example.yaml` to `config.yaml` and put the real office details there. `config.yaml` is
+git-ignored, so lawyers' names and emails never reach GitHub. On the server you create it by hand.
 
 ### 1. Try it in the terminal (no phone needed)
 
@@ -56,7 +68,8 @@ This is the fastest way to tune how she talks.
    ngrok http 8000
    ```
    Put the ngrok https URL in `PUBLIC_BASE_URL` in `.env` and restart.
-3. In the Twilio number's settings, set "A call comes in" → Webhook → `https://<ngrok>/voice/incoming` (POST).
+3. Point the number at the server: `.venv/Scripts/python -m scripts.twilio_number secretary`
+   (or `samples` to hear every Hebrew voice and pick one for `TTS_VOICE`).
 4. Call the Twilio number and talk to her.
 5. Try a few Hebrew voices (`TTS_PROVIDER` / `TTS_VOICE`) and keep the one that sounds most natural.
 

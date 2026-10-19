@@ -24,6 +24,12 @@ ConversationFactory = Callable[[str | None], Conversation]
 _WORDS_PER_MINUTE = 150
 
 
+def caller_number(raw: str | None) -> str | None:
+    """Withheld caller ID arrives as "anonymous" or a non-number placeholder."""
+    raw = raw or ""
+    return raw if raw.lstrip("+").isdigit() and len(raw) > 6 else None
+
+
 def speak_seconds(text: str) -> float:
     return len(text.split()) / _WORDS_PER_MINUTE * 60
 
@@ -74,9 +80,7 @@ class RelaySession:
             self.closed = True
             return
         self.call_sid = call_sid
-        number = msg.get("from") or ""
-        # Withheld caller ID arrives as "anonymous" or a non-number placeholder.
-        self.caller_number = number if number.lstrip("+").isdigit() and len(number) > 6 else None
+        self.caller_number = caller_number(msg.get("from"))
         self.conversation = self._make_conversation(self.caller_number)
         logger.info("call %s from %s connected", call_sid, self.caller_number or "withheld")
 
@@ -86,6 +90,7 @@ class RelaySession:
             return
         # A new utterance supersedes any reply still being generated.
         await self._cancel_reply()
+        logger.info("call %s caller: %s", self.call_sid, text)
         self.conversation.add_caller(text)
         self._task = asyncio.create_task(self._reply())
 
@@ -103,6 +108,8 @@ class RelaySession:
             spoken.append(token)
             await self._send({"type": "text", "token": token, "last": False})
         await self._send({"type": "text", "token": "", "last": True})
+        logger.info("call %s assistant%s: %s", self.call_sid,
+                    " (hanging up)" if self.conversation.ended else "", "".join(spoken))
 
         if self.conversation.ended:
             await asyncio.sleep(speak_seconds("".join(spoken)) + self._hangup_padding)

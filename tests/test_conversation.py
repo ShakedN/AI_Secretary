@@ -1,6 +1,6 @@
 import asyncio
 
-from app.agent.conversation import DEFAULT_GOODBYE, ERROR_REPLY, Conversation
+from app.agent.conversation import DEFAULT_GOODBYE, ERROR_REPLY, FALLBACK_REPLY, Conversation
 from app.agent.prompt import build_system_prompt
 
 from .conftest import FakeLLM
@@ -62,4 +62,35 @@ def test_prompt_mentions_office_and_withheld_number(office):
     prompt = build_system_prompt(office, None)
     assert "כהן ושות'" in prompt and 'עו"ד דנה כהן' in prompt
     assert "חסוי" in prompt
-    assert "0501234567" in build_system_prompt(office, "0501234567")
+    assert "050-123-4567" in build_system_prompt(office, "0501234567")
+
+
+def test_caller_number_shown_in_local_format(office):
+    from app.agent.prompt import local_format
+    assert local_format("+972587858000") == "058-785-8000"
+    assert local_format("+97233822974") == "03-382-2974"
+    assert "058-785-8000" in build_system_prompt(office, "+972587858000")
+
+
+def test_silent_hangup_mid_conversation_is_ignored(office):
+    # The model hangs up without a word right after the caller gave details:
+    # retry once instead of cutting the client off.
+    llm = FakeLLM([([], True), (["רק לוודא — המספר הוא 0 5 8?"], False)])
+    conv = Conversation(office=office, llm=llm)
+    conv.add_caller("קוראים לי אפיק, 058 7 8 58 076 [זיהוי לא בטוח]")
+    assert run(collect(conv)) == "רק לוודא — המספר הוא 0 5 8?"
+    assert not conv.ended
+
+
+def test_silent_hangup_after_goodbye_is_honored(office):
+    conv = Conversation(office=office, llm=FakeLLM([([], True)]))
+    conv.add_caller("תודה, ביי")
+    assert run(collect(conv)) == DEFAULT_GOODBYE
+    assert conv.ended
+
+
+def test_twice_silent_hangup_falls_back_to_a_question(office):
+    conv = Conversation(office=office, llm=FakeLLM([([], True), ([], True)]))
+    conv.add_caller("אני רוצה חוזה")
+    assert run(collect(conv)) == FALLBACK_REPLY
+    assert not conv.ended

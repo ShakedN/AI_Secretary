@@ -23,7 +23,7 @@ services:
       - key: TTS_PROVIDER
         value: Google
       - key: TTS_VOICE
-        value: he-IL-Wavenet-A
+        value: he-IL-Wavenet-C
       - key: SMTP_HOST
         value: smtp.gmail.com
       - key: SMTP_PORT

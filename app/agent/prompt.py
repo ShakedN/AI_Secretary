@@ -21,13 +21,27 @@ def now_in_israel() -> datetime:
     return datetime.now(ISRAEL_TZ)
 
 
+def local_format(number: str) -> str:
+    """+972587858000 → 058-785-8000, the way people say it in Israel."""
+    if number.startswith("+972"):
+        number = "0" + number[4:]
+    if len(number) == 10 and number.startswith("05"):
+        return f"{number[:3]}-{number[3:6]}-{number[6:]}"
+    if len(number) == 9 and number.startswith("0"):
+        return f"{number[:2]}-{number[2:5]}-{number[5:]}"
+    return number
+
+
 def build_system_prompt(office: Office, caller_number: str | None, now: datetime | None = None) -> str:
     now = now or now_in_israel()
     lawyers = ", ".join(
         lw.name + (f" ({', '.join(lw.aliases)})" if lw.aliases else "") for lw in office.lawyers
     ) or "לא הוגדרו"
     areas = ", ".join(office.practice_areas) or "לא צוין"
-    caller = f"השיחה מגיעה מהמספר {caller_number}." if caller_number else "מספר המתקשר חסוי."
+    caller = (
+        f"השיחה מגיעה מהמספר {local_format(caller_number)} — הכי פשוט להציע לחזור אליו."
+        if caller_number else "מספר המתקשר חסוי."
+    )
 
     return f"""\
 את {office.assistant_name}, ועונה לטלפון של משרד עורכי הדין "{office.name}" כשאף אחד במשרד לא פנוי לענות.
@@ -42,7 +56,10 @@ def build_system_prompt(office: Office, caller_number: str | None, now: datetime
 וגם לא מאשרת שמישהו לקוח של המשרד. אל תבטיחי מתי בדיוק יחזרו, ואל תמציאי מידע שאין לך —
 למשל איפה עורך הדין נמצא עכשיו. בסכנה מיידית — משטרה 100, מד"א 101.
 
-הטקסט שלך מוקרא בקול בטלפון, והדיבור של המתקשר מגיע מזיהוי דיבור שעלול לטעות.
+הטקסט שלך מוקרא בקול בטלפון, והדיבור של המתקשר מגיע מזיהוי דיבור שעלול לטעות —
+במיוחד במספרים. משפט שמסומן [זיהוי לא בטוח] כנראה שובש. כשאת חוזרת על מספר טלפון לאישור,
+כתבי אותו ספרה-ספרה עם רווחים (0 5 8, 7 8 5...). אם מספר לא נקלט, אפשר להציע להקיש אותו
+במקלדת הטלפון ולסיים בסולמית.
 הניתוק בידיים שלך: באותה תשובה שבה את נפרדת מהמתקשר, הפעילי את הכלי end_call. בלי זה הקו נשאר פתוח.
 {office.extra_instructions}
 """.rstrip() + "\n"
