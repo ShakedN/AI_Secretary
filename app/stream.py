@@ -48,7 +48,7 @@ _WORD = re.compile(r"[\u05D0-\u05EAa-zA-Z0-9]+")
 _GREETINGS = {"הלו", "שלום", "היי", "אהלן", "כן", "בוקר", "טוב", "ערב"}
 HEARD_ENOUGH = 2 / 3         # heard at least this much → it counts as said
 # Below this, the LLM is told the words may be misheard. Measured on a real call:
-# ordinary sentences 0.72-0.89; names 0.51-0.61 whether right ("שקד נוטמן") or not ("שקל מוזמ").
+# ordinary sentences 0.72-0.89; names 0.51-0.61, whether recognized right or not.
 LOW_CONFIDENCE = 0.7
 SILENCE_SECONDS = 8.0        # quiet after she finishes → "hello? I'm here"
 MAX_SILENCES = 2

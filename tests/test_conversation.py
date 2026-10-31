@@ -248,3 +248,41 @@ def test_a_real_refusal_counts(office):
     conv.add_caller("אני לא רוצה להגיד את השם שלי, ביי")
     run(collect(conv))
     assert conv.name_refused and conv.ended
+
+
+def test_she_stops_asking_for_the_name_after_three_tries(office):
+    from app.agent.conversation import MAX_NAME_ASKS
+    asks = [(["מה שמך המלא?"], False)] * MAX_NAME_ASKS
+    llm = FakeLLM(asks + [(["רשמתי, עורך הדין יוודא. להתראות."], True)])
+    conv = Conversation(office=office, llm=llm)
+    for heard in ["אני רוצה לקנות דירה", "עושה בל", "קלאסית"]:
+        conv.add_caller(heard)
+        run(collect(conv))
+    assert conv.name_asks() == MAX_NAME_ASKS
+    conv.add_caller("נכ")
+    run(collect(conv))
+    assert "אל תשאלי שוב" in llm.stream_calls[-1]["system"]
+    assert conv.ended  # no name, but she may hang up instead of looping
+
+
+def test_long_calls_are_steered_to_a_close(office):
+    from datetime import timedelta
+
+    def system_after(minutes):
+        llm = FakeLLM([(["בסדר."], False)])
+        conv = Conversation(office=office, llm=llm)
+        conv.started_at -= timedelta(minutes=minutes)
+        conv.add_caller("עוד משהו")
+        run(collect(conv))
+        return llm.stream_calls[0]["system"]
+
+    assert "לכוון לסיום" not in system_after(1)
+    assert "לכוון לסיום" in system_after(3.6)
+    assert "סיימי עכשיו" in system_after(5.5)
+
+
+def test_no_hang_up_right_after_asking_a_question(office):
+    conv = Conversation(office=office, llm=FakeLLM([(["רשמתי. האם יש עוד משהו שתרצה להוסיף?"], True)]))
+    conv.add_caller("קוראים לי משה, זה בערך הכל")
+    run(collect(conv))
+    assert not conv.ended

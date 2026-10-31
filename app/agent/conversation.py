@@ -39,6 +39,10 @@ _NOT_NAMES = {
     "בטלפון", "מהטלפון", "לגבי", "בקשר", "מדבר", "מדברת", "מתקשר", "מתקשרת",
 }
 MAX_BLOCKED_HANGUPS = 2  # after this many, let the call end even without a name
+MAX_NAME_ASKS = 3        # after asking this many times, stop and let the lawyer confirm it
+WRAP_UP_MINUTES = 3.5    # start steering the call to a close
+MUST_FINISH_MINUTES = 5  # summarize and say goodbye now
+_NAME_QUESTION = ("שמך", "השם", "שם המשפחה", "שם מלא", "שם פרטי", "איך קוראים", "באיזה שם", "לאיית")
 ASK_NAME = "רגע, לפני שנסיים — איך קוראים לך? שם פרטי ושם משפחה, כדי שעורך הדין יידע מי חיפש אותו."
 _REFUSALS = ("לא רוצה", "לא מעוניין", "לא מעוניינת", "מעדיף שלא", "מעדיפה שלא", "בלי שם",
              "לא חשוב", "לא משנה", "לא אגיד", "לא אמסור", "אין צורך", "לא צריך")
@@ -85,13 +89,44 @@ class Conversation:
         if not self.caller_name:
             self.caller_name = name_in(text)
 
+    def name_asks(self) -> int:
+        """How many times she has already asked for the caller's name."""
+        return sum(
+            1 for t in self.turns
+            if t.role == "assistant" and "?" in t.text and any(w in t.text for w in _NAME_QUESTION)
+        )
+
     def may_hang_up(self) -> bool:
-        """Only once we know who called (or they won't say) — or we've already
-        held the line open twice, so nobody gets trapped on the call."""
-        return bool(self.caller_name or self.name_refused or self.blocked_hangups >= MAX_BLOCKED_HANGUPS)
+        """Only once we know who called (or they won't say, or recognition kept
+        failing) — or we've already held the line open twice, so nobody gets
+        trapped on the call."""
+        return bool(
+            self.caller_name or self.name_refused
+            or self.name_asks() >= MAX_NAME_ASKS or self.blocked_hangups >= MAX_BLOCKED_HANGUPS
+        )
 
     def _status(self) -> str:
         """Live checklist appended to the system prompt each turn."""
+        return self._name_status() + self._time_status()
+
+    def _time_status(self) -> str:
+        # A message-taking call shouldn't drag on: steer toward a close, never cut mid-sentence.
+        minutes = (now_in_israel() - self.started_at).total_seconds() / 60
+        if minutes >= MUST_FINISH_MINUTES:
+            return (f"\nהשיחה נמשכת כבר {minutes:.0f} דקות — סיימי עכשיו: סכמי במשפט אחד את הפרטים "
+                    "שיש לך, אמרי שעורך הדין יחזור, ונפרדי.")
+        if minutes >= WRAP_UP_MINUTES:
+            return (f"\nהשיחה נמשכת כבר {minutes:.1f} דקות — התחילי לכוון לסיום: חזרי בקצרה על השם, "
+                    "המספר והנושא, שאלי אם יש עוד משהו חשוב, ונפרדי.")
+        return ""
+
+    def _name_status(self) -> str:
+        if self.name_asks() >= MAX_NAME_ASKS and not self.name_refused:
+            # Names are what phone recognition gets wrong most (one surname came out five
+            # different ways in one call). Going round in circles makes callers hang up.
+            heard = f' ("{self.caller_name}")' if self.caller_name else ""
+            return (f"\n\nשם המתקשר: כבר שאלת עליו {self.name_asks()} פעמים{heard}. אל תשאלי שוב — "
+                    "רשמי את מה שנקלט ואמרי שעורך הדין יוודא את הפרטים כשיחזור.")
         if self.caller_name:
             return f"\n\nשם המתקשר: {self.caller_name}."
         if self.name_refused:
@@ -190,6 +225,10 @@ class Conversation:
             # She closed with "...goodbye" but the model forgot end_call: the
             # caller would be left on a silent open line.
             hang_up = True
+        if hang_up and "".join(parts).strip().endswith("?"):
+            # "Anything else before we finish?" + end_call: she asked, so she waits for the answer.
+            logger.info("hang-up ignored: her reply ends with a question")
+            hang_up = False
         if hang_up and not self.may_hang_up():
             # The lawyer needs to know who called: keep the line open — the
             # status line now tells her the name is still missing.
