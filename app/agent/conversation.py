@@ -40,6 +40,7 @@ _NOT_NAMES = {
 }
 MAX_BLOCKED_HANGUPS = 2  # after this many, let the call end even without a name
 MAX_NAME_ASKS = 3        # after asking this many times, stop and let the lawyer confirm it
+_YES = ("כן", "נכון", "בסדר", "אפשר", "בטח", "זה המספר", "למספר הזה", "אוקיי", "יאללה")
 WRAP_UP_MINUTES = 3.5    # start steering the call to a close
 MUST_FINISH_MINUTES = 5  # summarize and say goodbye now
 _NAME_QUESTION = ("שמך", "השם", "שם המשפחה", "שם מלא", "שם פרטי", "איך קוראים", "באיזה שם", "לאיית")
@@ -61,6 +62,26 @@ def _ends_with_goodbye(text: str) -> bool:
     return bool(sentences) and any(word in sentences[-1] for word in _CLOSINGS)
 
 
+class _NoteFilter:
+    """Drops "[...]" spans from a token stream as it's written. Models imitate the
+    "[הערת מערכת: …]" notes they're given; a note spanning several streamed
+    sentences would slip past any per-sentence cleanup and be read aloud."""
+
+    def __init__(self) -> None:
+        self.inside = False
+
+    def feed(self, token: str) -> str:
+        out = []
+        for ch in token:
+            if ch == "[":
+                self.inside = True
+            elif ch == "]" and self.inside:
+                self.inside = False
+            elif not self.inside:
+                out.append(ch)
+        return "".join(out)
+
+
 @dataclass
 class Turn:
     role: str  # "caller" | "assistant"
@@ -78,16 +99,32 @@ class Conversation:
     caller_name: str = ""
     name_refused: bool = False
     blocked_hangups: int = 0
+    callback_confirmed: bool = False
+    # System notes for her next turn ("the caller talked over you…"). They go on
+    # the caller's side: notes inside her own past turns get imitated and read aloud.
+    _notes: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.system_prompt = build_system_prompt(self.office, self.caller_number, self.started_at)
 
     # ── history ──────────────────────────────────────────────────────────────
 
+    def add_note(self, note: str) -> None:
+        self._notes.append(note)
+
     def add_caller(self, text: str) -> None:
+        last_assistant = next((t.text for t in reversed(self.turns) if t.role == "assistant"), "")
+        if self._notes:
+            text = " ".join(self._notes) + " " + text.strip()
+            self._notes.clear()
         self.turns.append(Turn("caller", text.strip()))
         if not self.caller_name:
             self.caller_name = name_in(text)
+        if not self.callback_confirmed and (
+            "הקשתי במקלדת" in text
+            or ("מספר" in last_assistant and "?" in last_assistant and any(w in text for w in _YES))
+        ):
+            self.callback_confirmed = True
 
     def name_asks(self) -> int:
         """How many times she has already asked for the caller's name."""
@@ -95,6 +132,10 @@ class Conversation:
             1 for t in self.turns
             if t.role == "assistant" and "?" in t.text and any(w in t.text for w in _NAME_QUESTION)
         )
+
+    def _all_done(self) -> bool:
+        """Everything the lawyer needs is in hand: the name and a confirmed number."""
+        return bool((self.caller_name or self.name_refused) and self.callback_confirmed)
 
     def may_hang_up(self) -> bool:
         """Only once we know who called (or they won't say, or recognition kept
@@ -107,7 +148,8 @@ class Conversation:
 
     def _status(self) -> str:
         """Live checklist appended to the system prompt each turn."""
-        return self._name_status() + self._time_status()
+        callback = "\nמספר לחזרה: המתקשר כבר אישר — אל תשאלי עליו שוב." if self.callback_confirmed else ""
+        return self._name_status() + callback + self._time_status()
 
     def _time_status(self) -> str:
         # A message-taking call shouldn't drag on: steer toward a close, never cut mid-sentence.
@@ -138,13 +180,19 @@ class Conversation:
         """The caller talked over us: only `spoken` was actually heard, so keep
         just that in history — otherwise the model believes it said things the
         caller never heard. `wanted` (the full line) lets it say the rest again."""
-        text = (spoken.strip() + " [נקטעתי]").strip()
-        if wanted and wanted.strip() != spoken.strip():
-            text += f" (רציתי לומר: \"{wanted.strip()}\")"
+        heard = spoken.strip()
         if self.turns and self.turns[-1].role == "assistant":
-            self.turns[-1].text = text
-        elif spoken.strip():
-            self.turns.append(Turn("assistant", text))
+            if heard:
+                self.turns[-1].text = heard + "…"
+            else:
+                self.turns.pop()
+        elif heard:
+            self.turns.append(Turn("assistant", heard + "…"))
+        note = f'[הערת מערכת: המתקשר דיבר מעלייך — הוא שמע רק "{heard}"' if heard else \
+            "[הערת מערכת: המתקשר דיבר מעלייך לפני שהספקת לומר משהו"
+        if wanted and wanted.strip() != heard:
+            note += f'. רצית לומר: "{wanted.strip()}"'
+        self.add_note(note + "]")
 
     def messages(self) -> list[dict]:
         """Turns → Messages API format. Consecutive same-role turns are merged
@@ -181,6 +229,7 @@ class Conversation:
         mark_interrupted() records what was actually heard instead."""
         parts: list[str] = []
         hang_up = False
+        notes = _NoteFilter()
         try:
             if self.llm is None:
                 raise RuntimeError("no LLM configured")
@@ -199,20 +248,30 @@ class Conversation:
                         elif item.name:
                             self.caller_name = item.name
                     else:
-                        parts.append(item)
-                        yield item
-                if noted and not "".join(parts).strip():
+                        item = notes.feed(item)
+                        if item:
+                            parts.append(item)
+                            yield item
+                silent = not "".join(parts).strip()
+                if silent and self._all_done():
+                    # Name and number are settled and the model has nothing more to
+                    # say (it answered with tool calls only): a short goodbye ends it.
+                    hang_up = True
+                    break
+                if noted and silent:
                     # Models often stop right after noting the name, with nothing said
                     # (sometimes even trying to hang up silently). The name is in the
                     # status line now — ask again, words only. A spoken goodbye still
                     # ends the call through the closing-words rule below.
                     use_tools, hang_up = False, False
                     continue
-                if hang_up and not "".join(parts).strip() and not self._goodbye_already_said():
+                if hang_up and silent and not self._goodbye_already_said():
                     logger.warning("ignoring a silent hang-up mid-conversation; asking again")
                     hang_up = False
                     continue
                 break
+            if not "".join(parts).strip() and self._all_done():
+                hang_up = True  # the words-only retry came back empty too
         except Exception:
             if parts:
                 raise

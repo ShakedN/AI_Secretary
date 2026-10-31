@@ -233,7 +233,7 @@ def test_talking_over_the_greeting_is_flagged_for_the_llm(http, clock):
     clock.t += 3.5  # caller said "הלו? מי מדבר?" ~1 s into the greeting
     http.post("/voice/gather", data={"CallSid": "CA1", "SpeechResult": "הלו? מי מדבר?", "Confidence": "0.9"})
     caller = main._gather_calls["CA1"].turns[0].text
-    assert caller.startswith("[נקטעתי בפתיחה") and caller.endswith("הלו? מי מדבר?")
+    assert caller.startswith("[הערת מערכת: המתקשר דיבר מעל הפתיחה") and caller.endswith("הלו? מי מדבר?")
 
 
 def test_listening_to_the_end_is_not_an_interruption(http, clock):
@@ -253,8 +253,8 @@ def test_interrupted_reply_keeps_what_she_wanted_to_say(http, clock):
     clock.t += 3.0  # talked over the reply almost immediately
     http.post("/voice/gather", data={"CallSid": "CA1", "SpeechResult": "רגע רגע", "Confidence": "0.9"})
     turns = main._gather_calls["CA1"].turns
-    assert "[נקטעתי]" in turns[1].text and long_reply in turns[1].text
-    assert turns[2].text == "רגע רגע"
+    assert turns[1].text.endswith("…") and "[" not in turns[1].text
+    assert long_reply in turns[2].text and turns[2].text.endswith("רגע רגע")
 
 
 def test_noise_over_the_greeting_resumes_it(http, clock, azure):

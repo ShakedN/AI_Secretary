@@ -118,7 +118,7 @@ def test_talking_over_the_greeting_early_is_not_an_answer(office):
     s, sent = asyncio.run(scenario())
     assert "clear" in kinds(sent)
     caller = s.conversation.turns[0].text
-    assert caller.startswith("[נקטעתי בפתיחה") and caller.endswith("הלו? מי מדבר?")
+    assert caller.startswith("[הערת מערכת: המתקשר דיבר מעל הפתיחה") and caller.endswith("הלו? מי מדבר?")
 
 
 def reply_then_interrupt(office, after_share):
@@ -144,9 +144,9 @@ def reply_then_interrupt(office, after_share):
 def test_cut_off_early_she_knows_what_was_missed(office):
     s, sent, question = reply_then_interrupt(office, after_share=0.3)
     assert "clear" in kinds(sent)
-    said = s.conversation.turns[1].text
-    assert "[נקטעתי]" in said and question in said  # what was heard + what she meant to say
-    assert s.conversation.turns[2].text == "רגע רגע זה דחוף"
+    said, caller = s.conversation.turns[1].text, s.conversation.turns[2].text
+    assert said.endswith("…") and "[" not in said  # her turn: only what was heard
+    assert question in caller and caller.endswith("רגע רגע זה דחוף")  # the note: what she meant to say
 
 
 def test_two_thirds_heard_counts_as_said(office):

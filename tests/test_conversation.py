@@ -51,11 +51,11 @@ def test_messages_merge_and_interrupt(office):
     conv.add_caller("שומעים?")
     conv.mark_interrupted("כן, אני")  # cut off before the reply was recorded
     conv.add_caller("רגע")
-    assert conv.messages() == [
-        {"role": "user", "content": "הלו\nשומעים?"},
-        {"role": "assistant", "content": "כן, אני [נקטעתי]"},
-        {"role": "user", "content": "רגע"},
-    ]
+    msgs = conv.messages()
+    assert msgs[0] == {"role": "user", "content": "הלו\nשומעים?"}
+    assert msgs[1] == {"role": "assistant", "content": "כן, אני…"}  # only what was heard, no markers
+    assert msgs[2]["role"] == "user" and msgs[2]["content"].startswith("[הערת מערכת: המתקשר דיבר מעלייך")
+    assert msgs[2]["content"].endswith("רגע")
 
 
 def test_prompt_mentions_office_and_withheld_number(office):
@@ -286,3 +286,51 @@ def test_no_hang_up_right_after_asking_a_question(office):
     conv.add_caller("קוראים לי משה, זה בערך הכל")
     run(collect(conv))
     assert not conv.ended
+
+
+def test_notes_copied_into_her_words_are_never_spoken():
+    from app.text import clean_for_speech
+    leaked = '[נקטעתי] (רציתי לומר: "מצטערת, לא הבנתי. האם אפשר לחזור אליך למספר הזה?")'
+    assert clean_for_speech(leaked) == ""
+    assert clean_for_speech('[הערת מערכת: משהו] האם אפשר לחזור אליך?') == "האם אפשר לחזור אליך?"
+
+
+def test_confirmed_callback_number_is_not_asked_again(office):
+    llm = FakeLLM([(["האם אפשר לחזור אליך למספר שממנו התקשרת?"], False), (["מצוין. מה שמך?"], False)])
+    conv = Conversation(office=office, llm=llm, caller_number="+972587858000")
+    conv.add_caller("אני צריך חוזה")
+    run(collect(conv))
+    assert not conv.callback_confirmed
+    conv.add_caller("כן, למספר הזה")
+    run(collect(conv))
+    assert conv.callback_confirmed
+    assert "אל תשאלי עליו שוב" in llm.stream_calls[-1]["system"]
+
+
+def test_note_written_by_the_model_is_dropped_even_across_tokens(office):
+    # Real reply: "[הערת מערכת: המתקשר אישר … end_call.] מעולה. רשמתי…" streamed in pieces.
+    tokens = ["[הערת מערכת: המתקשר אישר לחזור למספר. ", "יש לנו את כל הפרטים. ", "זה הזמן להיפרד.] ", "מעולה. רשמתי הכול."]
+    conv = Conversation(office=office, llm=FakeLLM([(tokens, False)]))
+    conv.add_caller("כן")
+    said = run(collect(conv))
+    assert "הערת" not in said and said.strip() == "מעולה. רשמתי הכול."
+    assert conv.turns[-1].text == "מעולה. רשמתי הכול."
+
+
+def test_tools_only_reply_after_everything_is_settled_says_goodbye(office):
+    # Real Gemini output after "כן" to the number: [note_caller_name, end_call], no words.
+    from app.llm import CallerName
+
+    class ToolsOnly(FakeLLM):
+        async def stream(self, system, messages, tools=True):
+            if tools:
+                yield CallerName("משה כהן")
+            async for item in super().stream(system, messages, tools):
+                yield item
+
+    conv = Conversation(office=office, llm=ToolsOnly([(["האם אפשר לחזור אליך למספר 0 5 8?"], False), ([], True)]))
+    conv.add_caller("קוראים לי משה כהן, אני צריך חוזה")
+    run(collect(conv))
+    conv.add_caller("כן")
+    assert run(collect(conv)) == DEFAULT_GOODBYE
+    assert conv.ended

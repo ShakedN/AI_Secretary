@@ -6,6 +6,8 @@ import re
 _EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F]")
 _EMOTICON = re.compile(r"(?<!\w)[:;=]-?[()DPp](?!\w)")
 _MARKUP = re.compile(r"[*_#`~>|\[\]{}()]")
+# "[הערת מערכת: …]" / "[נקטעתי]" / "(רציתי לומר: …)" are notes to her, never words to say.
+_NOTE = re.compile(r"\[[^\]]*\]|\((?:רציתי|רצית) לומר[^)]*\)?|^\s*\(?(?:רציתי|רצית) לומר:\s*")
 
 _SENTENCE_END = re.compile(r"[.!?…]+\s+")
 
@@ -29,6 +31,7 @@ def take_finished_sentences(buffer: str) -> tuple[list[str], str]:
 
 def clean_for_speech(text: str) -> str:
     """Drop what a voice can't say: emoji, ":)", markdown and brackets."""
+    text = _NOTE.sub("", text)
     text = _EMOJI.sub("", text)
     text = _EMOTICON.sub("", text)
     text = _MARKUP.sub("", text)

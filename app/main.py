@@ -339,7 +339,7 @@ async def voice_gather(request: Request):
     if heard is not None:
         logger.info("call %s caller interrupted after: %r", call_sid, heard)
         if spoken.is_greeting:
-            speech = f"[נקטעתי בפתיחה — המתקשר שמע רק: \"{heard}\" ואז דיבר] {speech}"
+            speech = f"[הערת מערכת: המתקשר דיבר מעל הפתיחה שלך — הוא שמע רק \"{heard}\"] {speech}"
         else:
             conv.mark_interrupted(heard, wanted=spoken.text)
 

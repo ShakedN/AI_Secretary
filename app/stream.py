@@ -298,7 +298,7 @@ class CallStream:
             if u.in_history and not u.recorded:  # heard enough: it counts as said
                 self.conversation.turns.append(Turn("assistant", u.text.strip()))
         elif u.is_greeting:
-            self._note = f'[נקטעתי בפתיחה — המתקשר שמע רק: "{heard}" ואז דיבר]'
+            self._note = f'[הערת מערכת: המתקשר דיבר מעל הפתיחה שלך — הוא שמע רק "{heard}"]'
         elif u.in_history:
             self.conversation.mark_interrupted(heard, wanted=u.text)
 
