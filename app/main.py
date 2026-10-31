@@ -479,6 +479,20 @@ async def health():
     return {"ok": True, "llm": settings.LLM_PROVIDER if app.state.llm is not None else None}
 
 
+@app.get("/", response_class=HTMLResponse)
+async def home():
+    # A browser check that the server is up — this address is really for Twilio.
+    ok = app.state.llm is not None
+    status = "פעילה ועונה לשיחות" if ok else "השרת פועל, אבל אין חיבור למודל השפה"
+    return HTMLResponse(
+        '<!doctype html><html lang="he" dir="rtl"><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1"><title>מזכירה דיגיטלית</title>'
+        '<body style="font-family:system-ui,Arial;max-width:520px;margin:15vh auto;padding:0 16px;text-align:center">'
+        f'<div style="font-size:48px">{"✅" if ok else "⚠️"}</div><h1>המזכירה הדיגיטלית {status}</h1>'
+        '<p style="color:#666">הכתובת הזו משמשת את מערכת הטלפון (Twilio). אין כאן מה לעשות בדפדפן.</p></body></html>'
+    )
+
+
 # ── Browser voice test (no phone, no Twilio) ────────────────────────────────
 # /test plays the part of Twilio ConversationRelay: the browser does speech
 # recognition + speech synthesis and talks to /relay with the same messages,

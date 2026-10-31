@@ -148,3 +148,9 @@ def test_voice_samples_twiml_lists_every_hebrew_voice(monkeypatch):
     for voice in main.SAMPLE_VOICES:
         assert f'voice="Google.{voice}"' in xml
     assert "<Hangup" in xml
+
+
+def test_home_page_says_the_server_is_up():
+    with TestClient(main.app) as http:
+        page = http.get("/")
+    assert page.status_code == 200 and "המזכירה הדיגיטלית" in page.text
