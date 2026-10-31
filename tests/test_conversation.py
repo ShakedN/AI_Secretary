@@ -29,14 +29,14 @@ def test_reply_streams_and_records(office):
 
 def test_end_call_without_text_says_goodbye(office):
     conv = Conversation(office=office, llm=FakeLLM([([], True)]))
-    conv.add_caller("זהו, תודה")
+    conv.add_caller("קוראים לי משה, זהו, תודה")
     assert run(collect(conv)) == DEFAULT_GOODBYE
     assert conv.ended
 
 
 def test_llm_failure_falls_back(office):
     class Broken:
-        async def stream(self, system, messages):
+        async def stream(self, system, messages, tools=True):
             raise RuntimeError("down")
             yield
 
@@ -53,7 +53,7 @@ def test_messages_merge_and_interrupt(office):
     conv.add_caller("רגע")
     assert conv.messages() == [
         {"role": "user", "content": "הלו\nשומעים?"},
-        {"role": "assistant", "content": "כן, אני [נקטע]"},
+        {"role": "assistant", "content": "כן, אני [נקטעתי]"},
         {"role": "user", "content": "רגע"},
     ]
 
@@ -84,7 +84,7 @@ def test_silent_hangup_mid_conversation_is_ignored(office):
 
 def test_silent_hangup_after_goodbye_is_honored(office):
     conv = Conversation(office=office, llm=FakeLLM([([], True)]))
-    conv.add_caller("תודה, ביי")
+    conv.add_caller("קוראים לי משה, תודה, ביי")
     assert run(collect(conv)) == DEFAULT_GOODBYE
     assert conv.ended
 
@@ -94,3 +94,157 @@ def test_twice_silent_hangup_falls_back_to_a_question(office):
     conv.add_caller("אני רוצה חוזה")
     assert run(collect(conv)) == FALLBACK_REPLY
     assert not conv.ended
+
+
+def test_closing_goodbye_hangs_up_even_without_end_call(office):
+    # 17:46:52 on a real call: "...שיהיה המשך יום נעים, להתראות." — but no end_call.
+    conv = Conversation(office=office, llm=FakeLLM([(["רשמתי את הפרטים. שיהיה המשך יום נעים, להתראות."], False)]))
+    conv.add_caller("קוראים לי משה, תוכלי להתקשר למספר שהתקשרתי ממנו")
+    run(collect(conv))
+    assert conv.ended
+
+
+def test_goodbye_word_mid_reply_does_not_hang_up(office):
+    conv = Conversation(office=office, llm=FakeLLM([(["יום טוב גם לך! במה מדובר?"], False)]))
+    conv.add_caller("יום טוב")
+    run(collect(conv))
+    assert not conv.ended
+
+
+def test_pronunciation_dictionary_changes_only_the_audio():
+    from app import tts
+    tts.set_pronunciation({"ושות'": "ושותפים", 'עו"ד': "עורך דין", 'עו"ד דנה כהן': "עורכת הדין דנה כהן"})
+    try:
+        assert tts.spoken_form("משרד כהן ושות'") == "משרד כהן ושותפים"
+        assert tts.spoken_form('עו"ד דנה כהן ועו"ד לוי') == "עורכת הדין דנה כהן ועורך דין לוי"
+        assert "ושותפים" in tts._ssml("כהן ושות'")
+    finally:
+        tts.set_pronunciation({})
+
+
+def test_office_knowledge_is_in_the_prompt(office):
+    office.knowledge = "שעות פעילות: ראשון עד חמישי"
+    prompt = build_system_prompt(office, None)
+    assert "שעות פעילות: ראשון עד חמישי" in prompt and "אל תשלימי מהדמיון" in prompt
+
+
+def test_recognition_phrases_stay_short_and_include_the_office(office):
+    from app import vocabulary
+    office.vocabulary = ["תמ\"א 38"]
+    words = vocabulary.phrases(office)
+    assert "חוזה בניין" in words and "דנה כהן" in words and "תמ\"א 38" in words
+    assert len(words) < 40  # a long list dilutes the boost (tested on a real call)
+
+
+def test_no_hang_up_before_the_callers_name(office):
+    # Goodbye + end_call, but nobody asked who called: the line stays open.
+    conv = Conversation(office=office, llm=FakeLLM([(["תודה, להתראות."], True)]))
+    conv.add_caller("אני צריך חוזה שכירות, זה הכל")
+    run(collect(conv))
+    assert not conv.ended and conv.blocked_hangups == 1
+
+
+def test_status_tells_her_the_name_is_missing(office):
+    llm = FakeLLM([(["מה שמך?"], False)])
+    conv = Conversation(office=office, llm=llm)
+    conv.add_caller("אני צריך חוזה")
+    run(collect(conv))
+    assert "עוד לא ידוע" in llm.stream_calls[0]["system"]
+
+
+def test_name_from_the_tool_or_from_speech_allows_hang_up(office):
+    from app.llm import CallerName
+
+    class NamingLLM(FakeLLM):
+        async def stream(self, system, messages, tools=True):
+            yield CallerName("אבי מזרחי")
+            async for item in super().stream(system, messages, tools):
+                yield item
+
+    conv = Conversation(office=office, llm=NamingLLM([(["תודה אבי, להתראות."], True)]))
+    conv.add_caller("אבי מזרחי, זה הכל")
+    run(collect(conv))
+    assert conv.caller_name == "אבי מזרחי" and conv.ended
+
+    spoken = Conversation(office=office, llm=FakeLLM([(["תודה, להתראות."], True)]))
+    spoken.add_caller("קוראים לי רונית כהן, זה הכל")
+    run(collect(spoken))
+    assert spoken.caller_name == "רונית כהן" and spoken.ended
+
+
+def test_caller_who_refuses_a_name_is_not_trapped(office):
+    from app.llm import CallerName
+
+    class RefusedLLM(FakeLLM):
+        async def stream(self, system, messages, tools=True):
+            yield CallerName("", refused=True)
+            async for item in super().stream(system, messages, tools):
+                yield item
+
+    conv = Conversation(office=office, llm=RefusedLLM([(["בסדר, להתראות."], True)]))
+    conv.add_caller("לא רוצה להגיד את השם, ביי")
+    run(collect(conv))
+    assert conv.ended
+
+
+def test_after_two_blocked_hang_ups_the_call_ends_anyway(office):
+    conv = Conversation(office=office, llm=FakeLLM([(["להתראות."], True)] * 3))
+    for _ in range(3):
+        conv.add_caller("ביי")
+        run(collect(conv))
+    assert conv.ended and conv.blocked_hangups == 2
+
+
+def test_tool_only_reply_asks_again_for_the_words(office):
+    # Gemini noted the name and stopped — no text. She must still answer.
+    from app.llm import CallerName
+
+    class ToolThenText(FakeLLM):
+        async def stream(self, system, messages, tools=True):
+            self.stream_calls.append({"system": system, "tools": tools})
+            if tools:
+                yield CallerName("אבי מזרחי")
+            else:
+                yield "תודה אבי, רשמתי."
+
+    llm = ToolThenText()
+    conv = Conversation(office=office, llm=llm)
+    conv.add_caller("אבי מזרחי")
+    assert run(collect(conv)) == "תודה אבי, רשמתי."
+    assert conv.caller_name == "אבי מזרחי"
+    assert [c["tools"] for c in llm.stream_calls] == [True, False]
+    assert "אבי מזרחי" in llm.stream_calls[1]["system"]
+
+
+def test_bye_is_not_a_refusal_and_she_asks_for_the_name(office):
+    from app.agent.conversation import ASK_NAME
+    from app.llm import CallerName
+
+    class ClaimsRefusal(FakeLLM):
+        async def stream(self, system, messages, tools=True):
+            if tools:
+                yield CallerName("", refused=True)
+            async for item in super().stream(system, messages, tools):
+                yield item
+
+    conv = Conversation(office=office, llm=ClaimsRefusal([(["רשמתי. המשך ערב נעים, להתראות."], False)]))
+    conv.add_caller("זהו, תודה ביי")
+    said = run(collect(conv))
+    assert not conv.name_refused and not conv.ended
+    assert said.endswith(ASK_NAME)
+
+
+def test_a_real_refusal_counts(office):
+    from app.llm import CallerName
+
+    class Refuses(FakeLLM):
+        async def stream(self, system, messages, tools=True):
+            if tools:
+                yield CallerName("", refused=True)
+            async for item in super().stream(system, messages, tools):
+                yield item
+
+    conv = Conversation(office=office, llm=Refuses([(["בסדר גמור, להתראות."], False)]))
+    conv.add_caller("אני לא רוצה להגיד את השם שלי, ביי")
+    run(collect(conv))
+    assert conv.name_refused and conv.ended

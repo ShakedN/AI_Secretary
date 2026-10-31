@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import AsyncIterator
 
-from ..llm import END_CALL, LLM
+from ..llm import END_CALL, LLM, CallerName
 from ..settings import Office
 from .prompt import build_system_prompt, now_in_israel
 
@@ -26,6 +27,36 @@ def _says_goodbye(text: str) -> bool:
     return any(word in text for word in _FAREWELLS)
 
 
+# Unmistakable closings — only these, at the very end of her reply, end the call.
+_CLOSINGS = ("להתראות", "ביי", "יום טוב", "יום נעים", "ערב טוב", "ערב נעים", "שבוע טוב", "שבת שלום")
+
+
+# Fallback for when the model doesn't call note_caller_name: "קוראים לי אבי מזרחי".
+_NAME_RE = re.compile(r"(?:קוראים לי|שמי|השם שלי(?: הוא)?)\s+([א-ת'\-]+(?:\s+[א-ת'\-]+)?)")
+_NOT_NAMES = {
+    "זה", "לא", "כן", "רק", "ו", "אני", "של", "עם", "על", "גם", "בבקשה", "פה", "כאן",
+    "ואני", "ואשמח", "וצריך", "ורוצה", "ומספר", "והמספר", "והטלפון", "במספר", "מהמספר",
+    "בטלפון", "מהטלפון", "לגבי", "בקשר", "מדבר", "מדברת", "מתקשר", "מתקשרת",
+}
+MAX_BLOCKED_HANGUPS = 2  # after this many, let the call end even without a name
+ASK_NAME = "רגע, לפני שנסיים — איך קוראים לך? שם פרטי ושם משפחה, כדי שעורך הדין יידע מי חיפש אותו."
+_REFUSALS = ("לא רוצה", "לא מעוניין", "לא מעוניינת", "מעדיף שלא", "מעדיפה שלא", "בלי שם",
+             "לא חשוב", "לא משנה", "לא אגיד", "לא אמסור", "אין צורך", "לא צריך")
+
+
+def name_in(text: str) -> str:
+    m = _NAME_RE.search(text)
+    if not m:
+        return ""
+    words = [w for w in m.group(1).split() if w not in _NOT_NAMES]
+    return " ".join(words[:2])
+
+
+def _ends_with_goodbye(text: str) -> bool:
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s]
+    return bool(sentences) and any(word in sentences[-1] for word in _CLOSINGS)
+
+
 @dataclass
 class Turn:
     role: str  # "caller" | "assistant"
@@ -40,6 +71,9 @@ class Conversation:
     started_at: datetime = field(default_factory=now_in_israel)
     turns: list[Turn] = field(default_factory=list)
     ended: bool = False
+    caller_name: str = ""
+    name_refused: bool = False
+    blocked_hangups: int = 0
 
     def __post_init__(self) -> None:
         self.system_prompt = build_system_prompt(self.office, self.caller_number, self.started_at)
@@ -48,12 +82,30 @@ class Conversation:
 
     def add_caller(self, text: str) -> None:
         self.turns.append(Turn("caller", text.strip()))
+        if not self.caller_name:
+            self.caller_name = name_in(text)
 
-    def mark_interrupted(self, spoken: str) -> None:
+    def may_hang_up(self) -> bool:
+        """Only once we know who called (or they won't say) — or we've already
+        held the line open twice, so nobody gets trapped on the call."""
+        return bool(self.caller_name or self.name_refused or self.blocked_hangups >= MAX_BLOCKED_HANGUPS)
+
+    def _status(self) -> str:
+        """Live checklist appended to the system prompt each turn."""
+        if self.caller_name:
+            return f"\n\nשם המתקשר: {self.caller_name}."
+        if self.name_refused:
+            return "\n\nשם המתקשר: המתקשר לא רצה למסור שם — לא להתעקש."
+        return ("\n\nשם המתקשר: עוד לא ידוע. לפני שנפרדים חובה לשאול לשמו — שם פרטי וגם שם משפחה, "
+                "כדי שעורך הדין יידע מי חיפש אותו. אם הוא לא רוצה למסור, לא להתעקש.")
+
+    def mark_interrupted(self, spoken: str, wanted: str = "") -> None:
         """The caller talked over us: only `spoken` was actually heard, so keep
-        just that in history — otherwise Claude believes it said things the
-        caller never heard."""
-        text = (spoken.strip() + " [נקטע]").strip()
+        just that in history — otherwise the model believes it said things the
+        caller never heard. `wanted` (the full line) lets it say the rest again."""
+        text = (spoken.strip() + " [נקטעתי]").strip()
+        if wanted and wanted.strip() != spoken.strip():
+            text += f" (רציתי לומר: \"{wanted.strip()}\")"
         if self.turns and self.turns[-1].role == "assistant":
             self.turns[-1].text = text
         elif spoken.strip():
@@ -97,13 +149,30 @@ class Conversation:
         try:
             if self.llm is None:
                 raise RuntimeError("no LLM configured")
+            use_tools = True
             for attempt in range(2):
-                async for item in self.llm.stream(self.system_prompt, self.messages()):
+                noted = False
+                async for item in self.llm.stream(self.system_prompt + self._status(), self.messages(), tools=use_tools):
                     if item is END_CALL:
                         hang_up = True
+                    elif isinstance(item, CallerName):
+                        noted = True
+                        if item.refused:
+                            # Only an actual refusal counts — a plain "ביי" isn't one.
+                            last = next((t.text for t in reversed(self.turns) if t.role == "caller"), "")
+                            self.name_refused = any(cue in last for cue in _REFUSALS)
+                        elif item.name:
+                            self.caller_name = item.name
                     else:
                         parts.append(item)
                         yield item
+                if noted and not "".join(parts).strip():
+                    # Models often stop right after noting the name, with nothing said
+                    # (sometimes even trying to hang up silently). The name is in the
+                    # status line now — ask again, words only. A spoken goodbye still
+                    # ends the call through the closing-words rule below.
+                    use_tools, hang_up = False, False
+                    continue
                 if hang_up and not "".join(parts).strip() and not self._goodbye_already_said():
                     logger.warning("ignoring a silent hang-up mid-conversation; asking again")
                     hang_up = False
@@ -117,6 +186,20 @@ class Conversation:
             self.turns.append(Turn("assistant", ERROR_REPLY))
             return
 
+        if not hang_up and _ends_with_goodbye("".join(parts)):
+            # She closed with "...goodbye" but the model forgot end_call: the
+            # caller would be left on a silent open line.
+            hang_up = True
+        if hang_up and not self.may_hang_up():
+            # The lawyer needs to know who called: keep the line open — the
+            # status line now tells her the name is still missing.
+            self.blocked_hangups += 1
+            hang_up = False
+            logger.info("hang-up blocked: caller's name not known yet")
+            if _ends_with_goodbye("".join(parts)):
+                # She already said goodbye out loud: don't leave a silent open line.
+                parts.append(" " + ASK_NAME)
+                yield " " + ASK_NAME
         if hang_up:
             self.ended = True
             if not "".join(parts).strip():

@@ -2,7 +2,8 @@
 one line in .env (LLM_PROVIDER).
 
     stream(system, messages)          → async iterator of text chunks, plus
-                                        END_CALL if the model hung up
+                                        CallerName when the model notes the
+                                        caller's name, and END_CALL if it hung up
     extract(system, text, name, schema) → dict matching the JSON schema
 
 `messages` is [{"role": "user"|"assistant", "content": str}, ...].
@@ -11,7 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import AsyncIterator, Protocol
+from dataclasses import dataclass
+from typing import AsyncIterator, Protocol, Union
 
 from . import settings
 
@@ -30,8 +32,34 @@ END_CALL_DESCRIPTION = (
 )
 
 
+@dataclass
+class CallerName:
+    name: str
+    refused: bool = False
+
+
+NOTE_NAME_DESCRIPTION = (
+    "Record the caller's name as soon as they say it (first name, and last name if given). "
+    "If the caller declines to give a name, call it with refused=true."
+)
+NOTE_NAME_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "description": "השם כפי שנמסר, למשל 'אבי מזרחי'"},
+        "refused": {"type": "boolean", "description": "true if the caller doesn't want to give a name"},
+    },
+}
+
+Item = Union[str, _EndCall, CallerName]
+
+
+def _caller_name(args: dict | None) -> CallerName:
+    args = args or {}
+    return CallerName(str(args.get("name") or "").strip(), bool(args.get("refused")))
+
+
 class LLM(Protocol):
-    def stream(self, system: str, messages: list[dict]) -> AsyncIterator[str | _EndCall]: ...
+    def stream(self, system: str, messages: list[dict], tools: bool = True) -> AsyncIterator[Item]: ...
 
     async def extract(self, system: str, text: str, name: str, schema: dict) -> dict: ...
 
@@ -43,17 +71,25 @@ class AnthropicLLM:
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._chat_model, self._summary_model = chat_model, summary_model
 
-    async def stream(self, system: str, messages: list[dict]) -> AsyncIterator[str | _EndCall]:
+    async def stream(self, system: str, messages: list[dict], tools: bool = True) -> AsyncIterator[Item]:
+        """tools=False: words only — for when the model answered with nothing but a tool call."""
+        kwargs = {"tools": [
+            {"name": "end_call", "description": END_CALL_DESCRIPTION, "input_schema": {"type": "object", "properties": {}}},
+            {"name": "note_caller_name", "description": NOTE_NAME_DESCRIPTION, "input_schema": NOTE_NAME_SCHEMA},
+        ]} if tools else {}
         async with self._client.messages.stream(
             model=self._chat_model,
-            max_tokens=400,
+            max_tokens=800,
             system=system,
             messages=messages,
-            tools=[{"name": "end_call", "description": END_CALL_DESCRIPTION, "input_schema": {"type": "object", "properties": {}}}],
+            **kwargs,
         ) as stream:
             async for text in stream.text_stream:
                 yield text
             final = await stream.get_final_message()
+        for block in final.content:
+            if block.type == "tool_use" and block.name == "note_caller_name":
+                yield _caller_name(block.input)
         if any(b.type == "tool_use" and b.name == "end_call" for b in final.content):
             yield END_CALL
 
@@ -92,12 +128,19 @@ class GeminiLLM:
             for m in messages
         ]
 
-    async def stream(self, system: str, messages: list[dict]) -> AsyncIterator[str | _EndCall]:
+    async def stream(self, system: str, messages: list[dict], tools: bool = True) -> AsyncIterator[Item]:
+        """tools=False: words only — for when the model answered with nothing but a tool call."""
         t = self._types
         config = t.GenerateContentConfig(
             system_instruction=system,
-            max_output_tokens=400,
-            tools=[t.Tool(function_declarations=[t.FunctionDeclaration(name="end_call", description=END_CALL_DESCRIPTION)])],
+            # Room for the reply plus the model's own thinking (which counts against this).
+            max_output_tokens=1500,
+            tools=[t.Tool(function_declarations=[
+                t.FunctionDeclaration(name="end_call", description=END_CALL_DESCRIPTION),
+                t.FunctionDeclaration(name="note_caller_name", description=NOTE_NAME_DESCRIPTION,
+                                      parameters_json_schema=NOTE_NAME_SCHEMA),
+            ])],
+            tool_config=None if tools else t.ToolConfig(function_calling_config=t.FunctionCallingConfig(mode="NONE")),
             automatic_function_calling=t.AutomaticFunctionCallingConfig(disable=True),
             thinking_config=self._thinking,
         )
@@ -112,6 +155,8 @@ class GeminiLLM:
                         yield part.text
                     if part.function_call and part.function_call.name == "end_call":
                         ended = True
+                    if part.function_call and part.function_call.name == "note_caller_name":
+                        yield _caller_name(part.function_call.args)
         if ended:
             yield END_CALL
 

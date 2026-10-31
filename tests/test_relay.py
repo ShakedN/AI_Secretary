@@ -47,7 +47,7 @@ def test_end_call_sends_end(office, monkeypatch):
         sent = []
         s = make_session(office, FakeLLM([(["להתראות"], True)]), sent)
         await s.handle(SETUP)
-        await s.handle({"type": "prompt", "voicePrompt": "תודה, ביי", "last": True})
+        await s.handle({"type": "prompt", "voicePrompt": "קוראים לי משה, תודה ביי", "last": True})
         await s._task
         return s, sent
 
@@ -71,7 +71,7 @@ def test_interrupt_cancels_reply_and_keeps_only_heard_text(office):
     s, sent = asyncio.run(scenario())
     assert s._task is None
     assert not any(m.get("last") for m in sent)
-    assert s.conversation.turns[-1].text == "מילה מילה [נקטע]"
+    assert s.conversation.turns[-1].text == "מילה מילה [נקטעתי]"
 
 
 def test_unknown_call_rejected(office):

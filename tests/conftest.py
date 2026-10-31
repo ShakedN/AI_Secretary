@@ -18,8 +18,8 @@ class FakeLLM:
         self._delay = delay
         self.stream_calls: list[dict] = []
 
-    async def stream(self, system, messages):
-        self.stream_calls.append({"system": system, "messages": messages})
+    async def stream(self, system, messages, tools=True):
+        self.stream_calls.append({"system": system, "messages": messages, "tools": tools})
         tokens, end_call = self._replies.pop(0)
         for t in tokens:
             if self._delay:
@@ -39,6 +39,7 @@ def isolate_from_dotenv(monkeypatch):
     monkeypatch.setattr(settings, "SMTP_HOST", "")
     monkeypatch.setattr(settings, "SMTP_USER", "")
     monkeypatch.setattr(settings, "TEST_PAGE", False)
+    monkeypatch.setattr(settings, "AZURE_SPEECH_KEY", "")
 
 
 @pytest.fixture

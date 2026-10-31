@@ -5,6 +5,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TZ=Asia/Jerusalem
 
 WORKDIR /app
+
+# Azure's speech SDK needs OpenSSL, CA certificates and the ALSA library on Linux.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3 libasound2 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

@@ -7,3 +7,5 @@ python-dotenv>=1.0
 pyyaml>=6.0
 python-multipart>=0.0.9
 tzdata
+httpx>=0.27
+azure-cognitiveservices-speech>=1.40

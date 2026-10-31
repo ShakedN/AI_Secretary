@@ -77,7 +77,7 @@ def test_websocket_call_end_to_end(monkeypatch):
         main._expected_calls["CA5"] = time.time()
         with http.websocket_connect("/relay") as ws:
             ws.send_json({"type": "setup", "callSid": "CA5", "from": "+972501234567"})
-            ws.send_json({"type": "prompt", "voicePrompt": "היי זה משה", "last": True})
+            ws.send_json({"type": "prompt", "voicePrompt": "היי, קוראים לי משה", "last": True})
             assert ws.receive_json() == {"type": "text", "token": "שלום משה", "last": False}
             assert ws.receive_json()["last"] is True
             ws.send_json({"type": "prompt", "voicePrompt": "תודה ביי", "last": True})
@@ -87,7 +87,7 @@ def test_websocket_call_end_to_end(monkeypatch):
             ws.send_json({"type": "dtmf", "digit": "1"})  # unblocks the receive loop so it sees `closed`
 
     assert finished and finished[0][0] == "CA5"
-    assert "היי זה משה" in finished[0][1]
+    assert "קוראים לי משה" in finished[0][1]
     assert "CA5" not in main._expected_calls
 
 

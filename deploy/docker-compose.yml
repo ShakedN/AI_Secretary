@@ -1,0 +1,34 @@
+# Production on a single VM: the app + Caddy (automatic HTTPS from Let's Encrypt).
+# Started by deploy/setup.sh; secrets come from ../.env and ../config.yaml,
+# which are copied to the server by hand and never stored in git.
+services:
+  app:
+    build: ..
+    env_file: ../.env
+    environment:
+      # Override the laptop/ngrok values from .env.
+      PUBLIC_BASE_URL: https://${DOMAIN}
+      TEST_PAGE: "false"
+      DB_PATH: /data/calls.db
+    volumes:
+      - ../config.yaml:/app/config.yaml:ro
+      - data:/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  data: {}
+  caddy_data: {}

@@ -17,5 +17,34 @@ practice_areas: ["דיני משפחה", "מקרקעין", "צוואות וירו
 # Optional: overrides the default opening line.
 # welcome_greeting: "שלום, הגעתם למשרד כהן ושות'..."
 
-# Optional: anything office-specific she should know (hours, address, etc.).
+# What she knows about the office and may tell callers. Anything not here she
+# doesn't know — she'll say so instead of making something up. Write it plainly.
+knowledge: |
+  שעות פעילות: ראשון עד חמישי, 9:00 עד 17:00. בשישי ושבת המשרד סגור.
+  כתובת: רחוב הרצל 1, תל אביב, קומה 3.
+  כשעורכי הדין לא עונים — פשוט אינם זמינים כרגע. לא לציין סיבה (ישיבה, בית משפט וכו').
+  פגישת ייעוץ ראשונה ושכר טרחה — רק בשיחה עם עורך הדין, לא בטלפון הזה.
+  המשרד לא מטפל בתיקים פליליים; פונים כאלה — לרשום בכל זאת ולומר שעורך דין יחזור אליהם.
+
+# How to say words the voice gets wrong — written form: how to say it.
+# Only the audio changes (the summary keeps the original). Vowel marks (ניקוד) help a lot.
+# Try a line: .venv/Scripts/python -m scripts.say "שלום, הגעתם למשרד כהן ושות'"
+pronunciation:
+  "ושות'": "ושותפים"
+  "עו\"ד דנה כהן": "עורכת הדין דנה כהן"
+  "עו\"ד יוסי לוי": "עורך הדין יוסי לוי"
+  "עו\"ד": "עורך דין"
+  # "שם" = name (shem), not "there" (sham) — the voice can't tell without vowels.
+  "באיזה שם": "בְּאֵיזֶה שֵׁם"
+  "שמך": "שִׁמְךָ"
+  "השם": "הַשֵּׁם"
+  "שם מלא": "שֵׁם מָלֵא"
+  "חוזה מכר": "חוֹזֶה מֶכֶר"
+  "מכר": "מֶכֶר"
+
+# Words the speech recognition should expect, on top of the built-in ones (contracts,
+# wills, real estate) and the lawyers' names. Keep it short — a long list weakens it.
+vocabulary: []
+
+# Optional: anything else about how she should behave at this office.
 extra_instructions: ""

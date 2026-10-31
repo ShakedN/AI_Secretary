@@ -23,6 +23,9 @@ ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 _DEFAULT_MODELS = {
     # Flash-Lite: ~0.6s to first word on the free tier, vs. up to a minute
     # for gemini-3.8-flash when the free tier is busy.
+    # Flash-Lite: fastest and cheapest. It fills gaps by inventing ("the lawyers
+    # are in court"), so the office facts in config.yaml (`knowledge`) matter.
+    # CHAT_MODEL=gemini-3.6-flash is the steadier, ~0.3 s slower alternative.
     "gemini": ("gemini-3.5-flash-lite", "gemini-3.5-flash-lite"),
     "anthropic": ("claude-haiku-5-5", "claude-sonnet-5-5"),
 }
@@ -43,13 +46,26 @@ PUBLIC_BASE_URL: str = (
 #   "gather" — Twilio <Gather> speech recognition (supports Hebrew) + <Say>, turn by turn.
 #   "relay"  — ConversationRelay (streaming, lower latency) — but Twilio rejects Hebrew
 #              speech recognition there (error 64101), so it only works for other languages.
+#   "stream" — Twilio Media Streams: our own listening (Azure STT) and talking (Azure TTS).
+#              Fastest and handles being talked over; needs the Azure keys below.
 VOICE_MODE: str = os.getenv("VOICE_MODE", "gather").strip().lower()
+# Stream mode: how long a pause (ms) ends the caller's sentence.
+STT_SILENCE_MS: int = int(os.getenv("STT_SILENCE_MS", "800"))
+# Debugging only: save each stream call's incoming audio to data/recordings/.
+RECORD_CALLS: bool = os.getenv("RECORD_CALLS", "").strip().lower() in ("1", "true", "yes")
 LANGUAGE: str = os.getenv("LANGUAGE", "he-IL")
 TTS_PROVIDER: str = os.getenv("TTS_PROVIDER", "Google")
 TTS_VOICE: str = os.getenv("TTS_VOICE", "he-IL-Wavenet-C")
 TRANSCRIPTION_PROVIDER: str = os.getenv("TRANSCRIPTION_PROVIDER", "Google")
 # Google's default "telephony" model has no Hebrew (Twilio error 64101), so use "long".
 SPEECH_MODEL: str = os.getenv("SPEECH_MODEL", "long")
+
+# Optional: speak with an Azure neural voice (e.g. Hila) instead of Twilio's <Say>.
+# Set the key + region of an Azure "Speech" resource to turn it on (app/tts.py).
+AZURE_SPEECH_KEY: str = os.getenv("AZURE_SPEECH_KEY", "")
+AZURE_SPEECH_REGION: str = os.getenv("AZURE_SPEECH_REGION", "")
+AZURE_VOICE: str = os.getenv("AZURE_VOICE", "he-IL-HilaNeural")
+AZURE_RATE: str = os.getenv("AZURE_RATE", "0%")  # e.g. "+10%" to speak a bit faster
 
 SMTP_HOST: str = os.getenv("SMTP_HOST", "")
 SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
@@ -85,6 +101,13 @@ class Office:
     lawyers: list[Lawyer]
     practice_areas: list[str] = field(default_factory=list)
     extra_instructions: str = ""
+    # Facts she may tell callers (hours, address, policies). Anything not
+    # here she doesn't know — so she says so instead of making it up.
+    knowledge: str = ""
+    # How to say words the voice gets wrong: {"ושות'": "ושותפים", ...}
+    pronunciation: dict[str, str] = field(default_factory=dict)
+    # Extra words speech recognition should expect (street names, client terms...).
+    vocabulary: list[str] = field(default_factory=list)
     welcome_greeting: str = ""
     cc_general: bool = True
 
@@ -120,6 +143,9 @@ def load_office(path: Path = OFFICE_CONFIG_PATH) -> Office:
         lawyers=[Lawyer(**lw) for lw in data.get("lawyers", [])],
         practice_areas=data.get("practice_areas", []),
         extra_instructions=data.get("extra_instructions", ""),
+        knowledge=(data.get("knowledge") or "").strip(),
+        pronunciation={str(k): str(v) for k, v in (data.get("pronunciation") or {}).items()},
+        vocabulary=[str(w) for w in (data.get("vocabulary") or [])],
         welcome_greeting=data.get("welcome_greeting", ""),
         cc_general=data.get("cc_general", True),
     )
