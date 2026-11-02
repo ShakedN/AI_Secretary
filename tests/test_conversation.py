@@ -334,3 +334,19 @@ def test_tools_only_reply_after_everything_is_settled_says_goodbye(office):
     conv.add_caller("כן")
     assert run(collect(conv)) == DEFAULT_GOODBYE
     assert conv.ended
+
+
+def test_a_name_the_caller_never_said_is_not_recorded(office):
+    from app.llm import CallerName
+
+    class Invents(FakeLLM):
+        async def stream(self, system, messages, tools=True):
+            if tools:
+                yield CallerName("רונית")
+            async for item in super().stream(system, messages, tools):
+                yield item
+
+    conv = Conversation(office=office, llm=Invents([(["אעביר לעורך הדין. איך קוראים לך?"], False)]))
+    conv.add_caller("עורך דין יוסי לוי")
+    run(collect(conv))
+    assert conv.caller_name == ""

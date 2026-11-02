@@ -133,6 +133,11 @@ class Conversation:
             if t.role == "assistant" and "?" in t.text and any(w in t.text for w in _NAME_QUESTION)
         )
 
+    def _caller_said(self, name: str) -> bool:
+        """At least one word of `name` appears in something the caller said."""
+        heard = " ".join(t.text for t in self.turns if t.role == "caller")
+        return any(len(w) > 1 and w in heard for w in name.split())
+
     def _all_done(self) -> bool:
         """Everything the lawyer needs is in hand: the name and a confirmed number."""
         return bool((self.caller_name or self.name_refused) and self.callback_confirmed)
@@ -245,8 +250,11 @@ class Conversation:
                             # Only an actual refusal counts — a plain "ביי" isn't one.
                             last = next((t.text for t in reversed(self.turns) if t.role == "caller"), "")
                             self.name_refused = any(cue in last for cue in _REFUSALS)
-                        elif item.name:
+                        elif item.name and self._caller_said(item.name):
                             self.caller_name = item.name
+                        elif item.name:
+                            # Lite once "noted" a name nobody said — keep it out of the summary.
+                            logger.warning("ignoring a name the caller never said: %s", item.name)
                     else:
                         item = notes.feed(item)
                         if item:
