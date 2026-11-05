@@ -28,7 +28,7 @@ from twilio.request_validator import RequestValidator
 from twilio.twiml.voice_response import Connect, Gather, Play, Say, VoiceResponse
 
 from . import db, notify, settings, tts, vocabulary
-from .stream import GOODBYE_SILENT, HELLO, TROUBLE, CallStream
+from .stream import GOODBYE_SILENT, HELLO, TIME_UP, TROUBLE, CallStream
 from .text import clean_for_speech, split_sentences
 from .agent.conversation import Conversation
 from .agent.prompt import now_in_israel
@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI):
         try:
             for line in (app.state.office.greeting(), _DIDNT_CATCH, "הלו? אני כאן, אפשר לדבר."):
                 await tts.audio_id_for(line)
-            for line in (app.state.office.greeting(), HELLO, GOODBYE_SILENT, TROUBLE):
+            for line in (app.state.office.greeting(), HELLO, GOODBYE_SILENT, TROUBLE, TIME_UP):
                 await tts.synthesize_mulaw(line)
         except Exception:
             logger.exception("could not pre-synthesize the greeting with Azure")

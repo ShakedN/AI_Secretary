@@ -52,6 +52,10 @@ HEARD_ENOUGH = 2 / 3         # heard at least this much → it counts as said
 LOW_CONFIDENCE = 0.7
 SILENCE_SECONDS = 8.0        # quiet after she finishes → "hello? I'm here"
 MAX_SILENCES = 2
+# Hard stop, whatever the model or the caller does (the prompt already asks her
+# to wrap up at 3.5 and 5 minutes). Also caps what one stuck call can cost.
+MAX_CALL_SECONDS = 6 * 60
+HANGUP_GRACE = 5.0           # Twilio never confirmed the goodbye played — hang up anyway
 
 START_BUFFER_SECONDS = 2.0   # start a reply only with this much audio ready, so it doesn't stutter
 PLAYBACK_DELAY = 0.4         # network + Twilio: the caller hears audio a bit after we send it
@@ -61,6 +65,7 @@ _BYE = ("להתראות", "ביי", "יום טוב", "המשך יום", "ערב 
 HELLO = "הלו? אני כאן, אפשר לדבר."
 GOODBYE_SILENT = "לא שומעים אתכם. אפשר להתקשר שוב בכל עת. להתראות."
 TROUBLE = "סליחה, יש לי תקלה בקו. אנא התקשרו שוב בעוד כמה דקות. להתראות."
+TIME_UP = "טוב, הבנתי את הפנייה. אני מעבירה את הפרטים לעורך הדין, ויחזרו אליכם בהקדם. תודה ולהתראות."
 
 Send = Callable[[dict], Awaitable[None]]
 Synthesize = Callable[[str], Awaitable[bytes]]
@@ -134,6 +139,8 @@ class CallStream:
         self._play_cursor = 0.0           # when the audio already sent will finish playing
         self._reply_task: asyncio.Task | None = None
         self._silence_task: asyncio.Task | None = None
+        self._time_limit_task: asyncio.Task | None = None
+        self._time_up = False             # past MAX_CALL_SECONDS: only the goodbye is left
         self._pending: list[str] = []     # caller's words not answered yet
         self._note = ""                   # "[cut off in the greeting…]" for the next turn
         self._silences = 0
@@ -162,7 +169,7 @@ class CallStream:
             self.closed = True
 
     async def close(self) -> None:
-        for task in (self._reply_task, self._silence_task):
+        for task in (self._reply_task, self._silence_task, self._time_limit_task):
             if task and not task.done():
                 task.cancel()
         if self._recognizer is not None:
@@ -178,6 +185,7 @@ class CallStream:
         self.stream_sid = start.get("streamSid")
         self.conversation = Conversation(office=self._office, llm=self._llm, caller_number=caller_number(params.get("from")))
         self._recognizer = self._make_recognizer(self.on_partial, self.on_final, self.on_error)
+        self._time_limit_task = asyncio.create_task(self._time_limit())
         logger.info("call %s streaming (caller %s)", self.call_sid, self.conversation.caller_number or "withheld")
         await self._say(self._office.greeting(), is_greeting=True)
 
@@ -231,7 +239,7 @@ class CallStream:
         self._recent_said.append((max(self._clock(), self._play_cursor), u.text))
 
     async def on_partial(self, text: str) -> None:
-        if not text.strip():
+        if not text.strip() or self._time_up:
             return
         self._cancel_silence_watch()
         if self._playing():
@@ -243,7 +251,7 @@ class CallStream:
 
     async def on_final(self, text: str, confidence: float = 1.0) -> None:
         text = text.strip()
-        if not text:
+        if not text or self._time_up:
             return
         talking = self._playing() or bool(self._recent_said and self._clock() - self._recent_said[-1][0] <= ECHO_TAIL)
         if talking and self._is_echo(text):
@@ -439,6 +447,26 @@ class CallStream:
             await self._say(GOODBYE_SILENT, end_call=True)
         else:
             await self._say(HELLO)
+
+    # ── Time limit ───────────────────────────────────────────────────────────
+
+    async def _time_limit(self) -> None:
+        await asyncio.sleep(MAX_CALL_SECONDS)
+        logger.info("call %s reached %d minutes — hanging up", self.call_sid, MAX_CALL_SECONDS // 60)
+        self._time_up = True  # from here the caller can't interrupt or start a new reply
+        self._cancel_silence_watch()
+        await self._cancel_reply()
+        if self._pending:  # said but not answered: still belongs in the lawyer's summary
+            self.conversation.add_caller(" ".join(self._pending))
+            self._pending.clear()
+        if self._speaking is not None:
+            await self._send({"event": "clear"})
+            self._play_cursor = self._clock()
+            self._speaking = None
+        self.conversation.ended = True
+        await self._say(TIME_UP, end_call=True)
+        await asyncio.sleep(max(self._play_cursor - self._clock(), 0.0) + HANGUP_GRACE)
+        self.closed = True
 
 
 def _is_bye(text: str) -> bool:

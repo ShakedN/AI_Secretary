@@ -216,6 +216,27 @@ def test_silence_prompts_then_says_goodbye(office, monkeypatch):
     assert s.conversation.ended and s._hangup_after == s._speaking.id
 
 
+def test_time_limit_says_goodbye_and_hangs_up_whatever_the_caller_does(office, monkeypatch):
+    monkeypatch.setattr(stream_mod, "MAX_CALL_SECONDS", 0.05)
+
+    async def scenario():
+        s, sent, clock = make(office, FakeLLM([(["רגע, אני בודקת. "], False)]))
+        await s.handle(START)
+        await finish_speaking(s, clock)
+        await s.on_final("ועוד דבר אחד")
+        await asyncio.sleep(0.1)
+        await s.on_final("רגע, לא סיימתי")  # ignored: no reply, no interruption
+        bye = s._speaking
+        await finish_speaking(s, clock)
+        return s, sent, bye
+
+    s, sent, bye = asyncio.run(scenario())
+    assert bye.text == stream_mod.TIME_UP
+    assert s.conversation.ended and s.closed
+    assert any(t.text == "ועוד דבר אחד" for t in s.conversation.turns)  # still in the summary
+    assert not any("לא סיימתי" in t.text for t in s.conversation.turns)
+
+
 def test_mutual_goodbye_hangs_up_even_if_the_model_forgets(office):
     async def scenario():
         s, _, clock = make(office, FakeLLM([(["בשמחה, להתראות!"], False)]))
