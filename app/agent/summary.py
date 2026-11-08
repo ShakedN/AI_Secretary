@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from ..llm import LLM
 from ..settings import Office
+from ..text import fix_arabic_letters, is_valid_phone
+from .prompt import local_format
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +79,14 @@ async def summarize(llm: LLM | None, office: Office, transcript: str, caller_num
         return fallback
 
     fields = CallSummary.__dataclass_fields__
-    result = CallSummary(**{k: str(v) for k, v in data.items() if k in fields})
+    result = CallSummary(**{k: fix_arabic_letters(str(v)) for k, v in data.items() if k in fields})
     if not result.callback_phone and caller_number:
         result.callback_phone = caller_number
+    elif result.callback_phone and not is_valid_phone(result.callback_phone):
+        # A digit was lost on the way ("054123456"): say so up front, with the caller ID to fall back on.
+        warning = f"המספר שנמסר בשיחה ({result.callback_phone}) לא תקין — כנראה חסרה או עודפת ספרה."
+        if caller_number:
+            warning += f" המספר שממנו התקשרו: {local_format(caller_number)}."
+        result.missing_info = warning + (" " + result.missing_info if result.missing_info else "")
+        result.callback_phone += " (לא תקין)"
     return result

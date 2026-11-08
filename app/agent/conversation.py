@@ -9,6 +9,7 @@ from typing import AsyncIterator
 
 from ..llm import END_CALL, LLM, CallerName
 from ..settings import Office
+from ..text import bad_phone_numbers, fix_arabic_letters
 from .prompt import build_system_prompt, now_in_israel
 
 logger = logging.getLogger(__name__)
@@ -114,15 +115,27 @@ class Conversation:
 
     def add_caller(self, text: str) -> None:
         last_assistant = next((t.text for t in reversed(self.turns) if t.role == "assistant"), "")
-        if self._notes:
-            text = " ".join(self._notes) + " " + text.strip()
-            self._notes.clear()
+        said_yes = any(w in text for w in _YES)
+        # A digit lost in recognition ("054123456") would reach the lawyer as a number
+        # nobody can call — and the model happily reads it back, or "fixes" it itself.
+        notes = list(self._notes)
+        self._notes.clear()
+        for number in bad_phone_numbers(text):
+            notes.append(f'[הערת מערכת: המספר שנקלט "{number}" לא נראה כמו מספר טלפון ישראלי תקין '
+                         "(לנייד 10 ספרות שמתחילות ב-05, לקווי 9). אל תשלימי ואל תתקני ספרות בעצמך — "
+                         "אמרי שכנראה לא נקלטו כל הספרות, ובקשי לומר את המספר שוב לאט או להקיש אותו במקלדת ולסיים בסולמית.]")
+        read_back_bad = bad_phone_numbers(last_assistant) if said_yes else []
+        for number in read_back_bad:
+            notes.append(f'[הערת מערכת: המספר שהקראת ("{number}") לא תקין — חסרה או עודפת בו ספרה, '
+                         "אז האישור של המתקשר לא מספיק. בקשי את המספר שוב.]")
+        if notes:
+            text = " ".join(notes) + " " + text.strip()
         self.turns.append(Turn("caller", text.strip()))
         if not self.caller_name:
             self.caller_name = name_in(text)
-        if not self.callback_confirmed and (
+        if not self.callback_confirmed and not read_back_bad and (
             "הקשתי במקלדת" in text
-            or ("מספר" in last_assistant and "?" in last_assistant and any(w in text for w in _YES))
+            or ("מספר" in last_assistant and "?" in last_assistant and said_yes)
         ):
             self.callback_confirmed = True
 
@@ -138,9 +151,15 @@ class Conversation:
         heard = " ".join(t.text for t in self.turns if t.role == "caller")
         return any(len(w) > 1 and w in heard for w in name.split())
 
+    def _name_read_back(self) -> bool:
+        """She said the name back at least once, so the caller could correct it."""
+        words = [w for w in self.caller_name.split() if len(w) > 1]
+        return any(t.role == "assistant" and any(w in t.text for w in words) for t in self.turns)
+
     def _all_done(self) -> bool:
-        """Everything the lawyer needs is in hand: the name and a confirmed number."""
-        return bool((self.caller_name or self.name_refused) and self.callback_confirmed)
+        """Everything the lawyer needs is in hand: a checked name and a confirmed number."""
+        name_ok = self.name_refused or (self.caller_name and self._name_read_back())
+        return bool(name_ok and self.callback_confirmed)
 
     def may_hang_up(self) -> bool:
         """Only once we know who called (or they won't say, or recognition kept
@@ -175,7 +194,12 @@ class Conversation:
             return (f"\n\nשם המתקשר: כבר שאלת עליו {self.name_asks()} פעמים{heard}. אל תשאלי שוב — "
                     "רשמי את מה שנקלט ואמרי שעורך הדין יוודא את הפרטים כשיחזור.")
         if self.caller_name:
-            return f"\n\nשם המתקשר: {self.caller_name}."
+            status = f"\n\nשם המתקשר: {self.caller_name}."
+            if not self._name_read_back():
+                status += " עוד לא חזרת עליו — חזרי עליו פעם אחת לאישור לפני שנפרדים."
+            if len(self.caller_name.split()) < 2:
+                status += " נקלט רק שם אחד — שאלי פעם אחת גם על שם המשפחה."
+            return status
         if self.name_refused:
             return "\n\nשם המתקשר: המתקשר לא רצה למסור שם — לא להתעקש."
         return ("\n\nשם המתקשר: עוד לא ידוע. לפני שנפרדים חובה לשאול לשמו — שם פרטי וגם שם משפחה, "
@@ -256,7 +280,10 @@ class Conversation:
                             # Lite once "noted" a name nobody said — keep it out of the summary.
                             logger.warning("ignoring a name the caller never said: %s", item.name)
                     else:
-                        item = notes.feed(item)
+                        kept = notes.feed(item)
+                        item = fix_arabic_letters(kept)
+                        if item != kept:
+                            logger.warning("replaced Arabic letters in the reply: %r", kept)
                         if item:
                             parts.append(item)
                             yield item

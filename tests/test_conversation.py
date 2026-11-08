@@ -328,7 +328,7 @@ def test_tools_only_reply_after_everything_is_settled_says_goodbye(office):
             async for item in super().stream(system, messages, tools):
                 yield item
 
-    conv = Conversation(office=office, llm=ToolsOnly([(["האם אפשר לחזור אליך למספר 0 5 8?"], False), ([], True)]))
+    conv = Conversation(office=office, llm=ToolsOnly([(["תודה משה כהן. האם אפשר לחזור אליך למספר 0 5 8?"], False), ([], True)]))
     conv.add_caller("קוראים לי משה כהן, אני צריך חוזה")
     run(collect(conv))
     conv.add_caller("כן")
@@ -350,3 +350,57 @@ def test_a_name_the_caller_never_said_is_not_recorded(office):
     conv.add_caller("עורך דין יוסי לוי")
     run(collect(conv))
     assert conv.caller_name == ""
+
+
+def test_a_new_name_is_read_back_before_she_says_goodbye(office):
+    # Real call: "דני כה אתמול" → note_caller_name("דני") and nothing else → she hung up
+    # with a half-heard name. Now she has to say it back first (and ask for the surname).
+    from app.llm import CallerName
+
+    class NotesName(FakeLLM):
+        async def stream(self, system, messages, tools=True):
+            if tools:
+                yield CallerName("דני")
+            async for item in super().stream(system, messages, tools):
+                yield item
+
+    conv = Conversation(office=office, llm=NotesName([([], False), (["תודה דני. ומה שם המשפחה?"], False)]))
+    conv.callback_confirmed = True
+    conv.add_caller("דני כה אתמול")
+    assert run(collect(conv)) == "תודה דני. ומה שם המשפחה?"
+    assert not conv.ended
+
+
+def test_arabic_letters_in_a_reply_become_hebrew(office):
+    from app.text import fix_arabic_letters
+    assert fix_arabic_letters("בשמחה, אני أرשום לדנה") == "בשמחה, אני ארשום לדנה"
+    assert fix_arabic_letters("בשمחה") == "בשמחה"
+    assert fix_arabic_letters("שלוم.") == "שלום."
+    conv = Conversation(office=office, llm=FakeLLM([(["בשمחה, ", "איזה מספר?"], False)]))
+    conv.add_caller("אני רוצה מספר אחר")
+    assert run(collect(conv)) == "בשמחה, איזה מספר?"
+
+
+def test_a_number_missing_a_digit_is_flagged(office):
+    conv = Conversation(office=office, llm=FakeLLM())
+    conv.add_caller("המספר זה 054123456.")
+    assert "לא נראה כמו מספר טלפון ישראלי תקין" in conv.turns[-1].text
+    conv.add_caller("סליחה, 054-123-4567")
+    assert "הערת מערכת" not in conv.turns[-1].text
+
+
+def test_yes_to_an_invalid_read_back_does_not_confirm_the_number(office):
+    conv = Conversation(office=office, llm=FakeLLM([(["האם המספר הוא 0 5 4 - 1 2 3 - 4 5 6?"], False)]))
+    conv.add_caller("המספר זה 054123456")
+    run(collect(conv))
+    conv.add_caller("כן")
+    assert not conv.callback_confirmed
+    assert "האישור של המתקשר לא מספיק" in conv.turns[-1].text
+
+
+def test_summary_warns_about_an_invalid_callback_number(office):
+    from app.agent.summary import summarize
+    llm = FakeLLM(summary={"caller_name": "דני", "callback_phone": "054123456", "summary": "חוזה"})
+    result = run(summarize(llm, office, "...", "+972521234567"))
+    assert "לא תקין" in result.callback_phone
+    assert "052-123-4567" in result.missing_info
