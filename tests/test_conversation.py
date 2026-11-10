@@ -404,3 +404,13 @@ def test_summary_warns_about_an_invalid_callback_number(office):
     result = run(summarize(llm, office, "...", "+972521234567"))
     assert "לא תקין" in result.callback_phone
     assert "052-123-4567" in result.missing_info
+
+
+def test_speech_has_no_leading_silence_and_the_greeting_has_its_own_speed(monkeypatch):
+    from app import settings, tts
+    monkeypatch.setattr(settings, "AZURE_RATE", "+20%")
+    monkeypatch.setattr(tts, "_line_rates", {})
+    tts.set_line_rate("שלום, הגעתם", "+25%")
+    greeting, reply = tts._ssml("שלום, הגעתם"), tts._ssml("מה שמך?")
+    assert "Leading-exact' value='0ms'" in reply and "xmlns:mstts" in reply
+    assert "rate='+25%'" in greeting and "rate='+20%'" in reply

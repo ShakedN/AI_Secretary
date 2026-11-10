@@ -56,12 +56,32 @@ def spoken_form(text: str) -> str:
     return text
 
 
+# Lines spoken at their own speed — the greeting is long and everyone has heard one before.
+_line_rates: dict[str, str] = {}
+
+
+def set_line_rate(text: str, rate: str) -> None:
+    if rate:
+        _line_rates[text] = rate
+
+
+# Azure pads every clip with silence for audiobook-style playback. On a call the leading
+# pad is just a longer wait before she starts talking; a reply is voiced sentence by
+# sentence, so each clip keeps a short tail as the pause before the next one.
+_SILENCE = (
+    "<mstts:silence type='Leading-exact' value='0ms'/>"
+    "<mstts:silence type='Tailing-exact' value='150ms'/>"
+    "<mstts:silence type='Sentenceboundary-exact' value='150ms'/>"
+)
+
+
 def _ssml(text: str) -> str:
-    text = spoken_form(text)
+    rate = _line_rates.get(text, settings.AZURE_RATE)
     return (
-        f"<speak version='1.0' xml:lang='{settings.LANGUAGE}'>"
-        f"<voice name='{settings.AZURE_VOICE}'>"
-        f"<prosody rate='{settings.AZURE_RATE}'>{html.escape(text)}</prosody>"
+        f"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' "
+        f"xmlns:mstts='http://www.w3.org/2001/mstts' xml:lang='{settings.LANGUAGE}'>"
+        f"<voice name='{settings.AZURE_VOICE}'>{_SILENCE}"
+        f"<prosody rate='{rate}'>{html.escape(spoken_form(text))}</prosody>"
         "</voice></speak>"
     )
 

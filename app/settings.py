@@ -69,6 +69,7 @@ AZURE_SPEECH_KEY: str = os.getenv("AZURE_SPEECH_KEY", "")
 AZURE_SPEECH_REGION: str = os.getenv("AZURE_SPEECH_REGION", "")
 AZURE_VOICE: str = os.getenv("AZURE_VOICE", "he-IL-HilaNeural")
 AZURE_RATE: str = os.getenv("AZURE_RATE", "0%")  # e.g. "+10%" to speak a bit faster
+AZURE_GREETING_RATE: str = os.getenv("AZURE_GREETING_RATE", "")  # the opening line only; empty = AZURE_RATE
 
 SMTP_HOST: str = os.getenv("SMTP_HOST", "")
 SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))

@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI):
     app.state.office = settings.load_office()
     app.state.llm = make_llm()
     tts.set_pronunciation(app.state.office.pronunciation)
+    tts.set_line_rate(app.state.office.greeting(), settings.AZURE_GREETING_RATE)
     if tts.enabled():
         # Pre-synthesize the greeting (and warm the Azure connection) so every
         # call opens instantly instead of waiting on the first TTS request.
