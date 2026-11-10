@@ -154,3 +154,32 @@ def test_home_page_says_the_server_is_up():
     with TestClient(main.app) as http:
         page = http.get("/")
     assert page.status_code == 200 and "המזכירה הדיגיטלית" in page.text
+
+
+def test_twilio_recording_starts_both_channels_and_never_breaks_the_call(monkeypatch):
+    import asyncio
+    import twilio.rest
+    from app import main, settings
+
+    created = []
+
+    class FakeClient:
+        def __init__(self, sid, token):
+            pass
+
+        def calls(self, call_sid):
+            class Recordings:
+                @staticmethod
+                def create(**kw):
+                    if call_sid == "CA_BAD":
+                        raise RuntimeError("twilio down")
+                    created.append((call_sid, kw))
+                    return type("R", (), {"sid": "RE1"})()
+            return type("Call", (), {"recordings": Recordings})()
+
+    monkeypatch.setattr(twilio.rest, "Client", FakeClient)
+    monkeypatch.setattr(settings, "TWILIO_ACCOUNT_SID", "AC1")
+    monkeypatch.setattr(settings, "TWILIO_AUTH_TOKEN", "t")
+    asyncio.run(main._start_twilio_recording("CA1"))
+    asyncio.run(main._start_twilio_recording("CA_BAD"))  # logged, not raised
+    assert created == [("CA1", {"recording_channels": "dual"})]

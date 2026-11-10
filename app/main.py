@@ -431,9 +431,14 @@ async def media(ws: WebSocket):
         is_allowed=lambda token: _stream_tokens.pop(token, None) is not None,
         record=settings.RECORD_CALLS,
     )
+    recording_started = False
     try:
         while not session.closed:
             await session.handle(await ws.receive_json())
+            if not recording_started and session.conversation is not None:
+                recording_started = True  # the call is verified and in progress now
+                if settings.TWILIO_RECORD_CALLS:
+                    _run_in_background(_start_twilio_recording(session.call_sid))
     except WebSocketDisconnect:
         pass
     finally:
@@ -444,9 +449,30 @@ async def media(ws: WebSocket):
             path = recording.save(settings.DB_PATH.parent / "recordings", session.call_sid or "call", bytes(session.recording))
             logger.info("call %s audio saved to %s", session.call_sid, path)
         if session.conversation is not None:
-            task = asyncio.create_task(finish_call(office, llm, session.call_sid, session.conversation))
-            _background.add(task)
-            task.add_done_callback(_background.discard)
+            _run_in_background(finish_call(office, llm, session.call_sid, session.conversation))
+
+
+def _run_in_background(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+async def _start_twilio_recording(call_sid: str | None) -> None:
+    """Both sides, one per channel. A failure here must never affect the call."""
+    if not (call_sid and settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN):
+        logger.warning("call %s: TWILIO_RECORD_CALLS is on but the Twilio account isn't set", call_sid)
+        return
+    from twilio.rest import Client
+
+    def start() -> str:
+        client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+        return client.calls(call_sid).recordings.create(recording_channels="dual").sid
+
+    try:
+        logger.info("call %s: recording %s", call_sid, await asyncio.to_thread(start))
+    except Exception:
+        logger.exception("call %s: could not start the Twilio recording", call_sid)
 
 
 # ── Voice samples: call the number and hear every Hebrew voice in turn ─────

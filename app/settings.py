@@ -34,6 +34,9 @@ CHAT_MODEL: str = os.getenv("CHAT_MODEL") or _chat_default
 SUMMARY_MODEL: str = os.getenv("SUMMARY_MODEL") or _summary_default
 
 TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
+# Have Twilio record every stream call, both sides (listen under Monitor → Logs → Call recordings).
+TWILIO_RECORD_CALLS: bool = os.getenv("TWILIO_RECORD_CALLS", "").strip().lower() in ("1", "true", "yes")
 # Public https URL Twilio reaches us on (e.g. an ngrok URL), no trailing slash.
 # On Render it's provided automatically as RENDER_EXTERNAL_URL.
 PUBLIC_BASE_URL: str = (
