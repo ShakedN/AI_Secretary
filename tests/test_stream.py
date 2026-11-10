@@ -216,6 +216,26 @@ def test_silence_prompts_then_says_goodbye(office, monkeypatch):
     assert s.conversation.ended and s._hangup_after == s._speaking.id
 
 
+def test_half_heard_answer_does_not_leave_a_dead_line(office, monkeypatch):
+    # Real call: "כן" came only as a partial result, no final — 28 s of silence followed.
+    monkeypatch.setattr(stream_mod, "SILENCE_SECONDS", 0.05)
+
+    async def scenario():
+        s, _, clock = make(office, FakeLLM([(["רשמתי. האם אפשר לחזור אליך למספר הזה?"], False)]))
+        await s.handle(START)
+        await finish_speaking(s, clock)
+        await s.on_final("קוראים לי משה כהן")
+        await s._reply_task
+        await finish_speaking(s, clock)
+        await s.on_partial("כן")  # ...and the final never arrives
+        await asyncio.sleep(0.15)
+        return s
+
+    s = asyncio.run(scenario())
+    assert s._speaking is not None
+    assert s._speaking.text == "סליחה, לא שמעתי. האם אפשר לחזור אליך למספר הזה?"
+
+
 def test_time_limit_says_goodbye_and_hangs_up_whatever_the_caller_does(office, monkeypatch):
     monkeypatch.setattr(stream_mod, "MAX_CALL_SECONDS", 0.05)
 

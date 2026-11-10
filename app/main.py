@@ -465,6 +465,8 @@ async def _start_twilio_recording(call_sid: str | None) -> None:
         return
     from twilio.rest import Client
 
+    logging.getLogger("twilio.http_client").setLevel(logging.WARNING)  # it logs every request's headers
+
     def start() -> str:
         client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
         return client.calls(call_sid).recordings.create(recording_channels="dual").sid

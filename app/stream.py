@@ -30,7 +30,7 @@ from typing import Awaitable, Callable
 from .agent.conversation import Conversation, Turn
 from .relay import caller_number
 from .settings import Office
-from .text import clean_for_speech, take_finished_sentences
+from .text import clean_for_speech, split_sentences, take_finished_sentences
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ HEARD_ENOUGH = 2 / 3         # heard at least this much → it counts as said
 # Below this, the LLM is told the words may be misheard. Measured on a real call:
 # ordinary sentences 0.72-0.89; names 0.51-0.61, whether recognized right or not.
 LOW_CONFIDENCE = 0.7
-SILENCE_SECONDS = 8.0        # quiet after she finishes → "hello? I'm here"
+SILENCE_SECONDS = 6.0        # quiet after she finishes (or after half-heard words) → check the caller is there
 MAX_SILENCES = 2
 # Hard stop, whatever the model or the caller does (the prompt already asks her
 # to wrap up at 3.5 and 5 minutes). Also caps what one stuck call can cost.
@@ -241,7 +241,11 @@ class CallStream:
     async def on_partial(self, text: str) -> None:
         if not text.strip() or self._time_up:
             return
+        # Restart the clock rather than stop it: Azure sometimes never finishes a short
+        # word ("כן" heard as a partial, no final) and the line went dead for 28 s.
         self._cancel_silence_watch()
+        if self._speaking is None:
+            self._start_silence_watch()
         if self._playing():
             if len(text.split()) >= self._barge_in_words() and not self._is_echo(text):
                 await self._interrupt()
@@ -445,8 +449,16 @@ class CallStream:
         if self._silences > MAX_SILENCES:
             self.conversation.ended = True
             await self._say(GOODBYE_SILENT, end_call=True)
+        elif self._silences == 1 and (question := self._last_question()):
+            # Most likely her question didn't get through (or the answer didn't): ask it again.
+            await self._say(f"סליחה, לא שמעתי. {question}")
         else:
             await self._say(HELLO)
+
+    def _last_question(self) -> str:
+        last = next((t.text for t in reversed(self.conversation.turns) if t.role == "assistant"), "")
+        sentences = split_sentences(last)
+        return sentences[-1] if sentences and sentences[-1].endswith("?") else ""
 
     # ── Time limit ───────────────────────────────────────────────────────────
 
