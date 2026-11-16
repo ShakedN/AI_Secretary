@@ -57,7 +57,9 @@ MAX_SILENCES = 2
 MAX_CALL_SECONDS = 6 * 60
 HANGUP_GRACE = 5.0           # Twilio never confirmed the goodbye played — hang up anyway
 
-START_BUFFER_SECONDS = 2.0   # start a reply only with this much audio ready, so it doesn't stutter
+# Start a reply only with this much audio ready, so it doesn't stutter. Clips carry no
+# leading silence and sentences are voiced in parallel, so a second is enough.
+START_BUFFER_SECONDS = 1.0
 PLAYBACK_DELAY = 0.4         # network + Twilio: the caller hears audio a bit after we send it
 # Clear goodbyes only — "תודה רבה" alone also opens plenty of mid-call sentences.
 _BYE = ("להתראות", "ביי", "יום טוב", "המשך יום", "ערב טוב", "שבוע טוב", "שבת שלום")
@@ -88,6 +90,7 @@ class Utterance:
     segments: list[Segment] = field(default_factory=list)
     done: bool = False             # all audio sent
     recorded: bool = False         # already in the conversation history
+    first_audio_at: float | None = None  # clock time its first audio went out
 
     def heard(self, now: float) -> tuple[str, float]:
         """What the caller has heard by `now`, and which share of the text that is."""
@@ -322,6 +325,8 @@ class CallStream:
     async def _play(self, u: Utterance, text: str, audio: bytes) -> None:
         if self._speaking is not u or not audio:
             return
+        if u.first_audio_at is None:
+            u.first_audio_at = self._clock()
         start = max(self._clock() + PLAYBACK_DELAY, self._play_cursor)
         seconds = len(audio) / BYTES_PER_SECOND
         self._play_cursor = start + seconds
@@ -367,10 +372,12 @@ class CallStream:
         self._speaking = u
         voiced: asyncio.Queue = asyncio.Queue()
         player = asyncio.create_task(self._play_in_order(u, voiced))
-        t0 = self._clock()
+        t0, first_words = self._clock(), None
         try:
             tail = ""
             async for token in conv.reply():
+                if first_words is None and token.strip():
+                    first_words = self._clock() - t0
                 u.text += token
                 done, tail = take_finished_sentences(tail + token)
                 for sentence in done:
@@ -385,6 +392,10 @@ class CallStream:
                 conv.ended = True
             logger.info("call %s assistant%s (%.1fs): %s", self.call_sid,
                         " (hanging up)" if conv.ended else "", self._clock() - t0, u.text.strip())
+            if first_words is not None and u.first_audio_at is not None:
+                # From the caller's finished sentence (Azure already waited STT_SILENCE_MS of quiet).
+                logger.info("call %s timing: first words written %.2fs, first audio sent %.2fs",
+                            self.call_sid, first_words, u.first_audio_at - t0)
             if self._speaking is u:
                 if conv.ended:
                     self._hangup_after = u.id

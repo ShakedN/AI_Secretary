@@ -53,7 +53,7 @@ PUBLIC_BASE_URL: str = (
 #              Fastest and handles being talked over; needs the Azure keys below.
 VOICE_MODE: str = os.getenv("VOICE_MODE", "gather").strip().lower()
 # Stream mode: how long a pause (ms) ends the caller's sentence.
-STT_SILENCE_MS: int = int(os.getenv("STT_SILENCE_MS", "800"))
+STT_SILENCE_MS: int = int(os.getenv("STT_SILENCE_MS", "650"))
 # Debugging only: save each stream call's incoming audio to data/recordings/.
 RECORD_CALLS: bool = os.getenv("RECORD_CALLS", "").strip().lower() in ("1", "true", "yes")
 LANGUAGE: str = os.getenv("LANGUAGE", "he-IL")
