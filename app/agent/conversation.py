@@ -58,6 +58,24 @@ def name_in(text: str) -> str:
     return " ".join(words[:2])
 
 
+# Once she has said goodbye, anything after it is the model glitching: a real call
+# ended "המשך יום טוב. דרך צביעה. אוי, המשך יום טוב." — every word is read aloud.
+_FAREWELL_LINES = ("להתראות", "המשך יום", "המשך ערב", "ביי")
+_GREETING_OR_FAREWELL = ("יום נעים", "ערב נעים", "שבוע טוב", "שבת שלום")  # also open a call: not as the first sentence
+_SENTENCE = re.compile(r"[^.!?…]*[.!?…]+")
+
+
+def _farewell_end(text: str) -> int | None:
+    """Where her first finished goodbye sentence ends, if she has said one."""
+    for i, m in enumerate(_SENTENCE.finditer(text)):
+        sentence = m.group().strip()
+        if sentence.endswith("?"):
+            continue
+        if any(w in sentence for w in _FAREWELL_LINES) or (i > 0 and any(w in sentence for w in _GREETING_OR_FAREWELL)):
+            return m.end()
+    return None
+
+
 def _ends_with_goodbye(text: str) -> bool:
     sentences = [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s]
     return bool(sentences) and any(word in sentences[-1] for word in _CLOSINGS)
@@ -263,6 +281,7 @@ class Conversation:
             if self.llm is None:
                 raise RuntimeError("no LLM configured")
             use_tools = True
+            said_goodbye = False
             for attempt in range(2):
                 noted = False
                 async for item in self.llm.stream(self.system_prompt + self._status(), self.messages(), tools=use_tools):
@@ -285,8 +304,21 @@ class Conversation:
                         if item != kept:
                             logger.warning("replaced Arabic letters in the reply: %r", kept)
                         if item:
-                            parts.append(item)
-                            yield item
+                            so_far = "".join(parts)
+                            cut = _farewell_end(so_far + item)
+                            if cut is not None:
+                                dropped = (so_far + item)[cut:]
+                                item, said_goodbye = (so_far + item)[len(so_far):cut], True
+                            if item:
+                                parts.append(item)
+                                yield item
+                            if said_goodbye:
+                                logger.info("stopped the reply after her goodbye%s",
+                                            f" (dropped {dropped!r})" if dropped.strip() else "")
+                                break
+                if said_goodbye:
+                    hang_up = True  # its end_call usually comes after the text we just cut off
+                    break
                 silent = not "".join(parts).strip()
                 if silent and self._all_done():
                     # Name and number are settled and the model has nothing more to

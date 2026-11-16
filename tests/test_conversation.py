@@ -414,3 +414,21 @@ def test_speech_has_no_leading_silence_and_the_greeting_has_its_own_speed(monkey
     greeting, reply = tts._ssml("שלום, הגעתם"), tts._ssml("מה שמך?")
     assert "Leading-exact' value='0ms'" in reply and "xmlns:mstts" in reply
     assert "rate='+25%'" in greeting and "rate='+20%'" in reply
+
+
+def test_nothing_is_said_after_her_goodbye(office):
+    # Real call: "...בהקדם. המשך יום טוב. דרך צביעה. אוי, המשך יום טוב." — the tail was read aloud.
+    tokens = ["רשמתי, עורך הדין יחזור אליך בהקדם. ", "המשך יום ", "טוב. דרך", " צביעה. אוי, המשך יום טוב."]
+    conv = Conversation(office=office, llm=FakeLLM([(tokens, False)]))
+    conv.caller_name, conv.callback_confirmed = "משה כהן", True
+    conv.add_caller("כן")
+    said = run(collect(conv))
+    assert said == "רשמתי, עורך הדין יחזור אליך בהקדם. המשך יום טוב."
+    assert conv.ended
+
+
+def test_a_greeting_word_at_the_start_does_not_end_the_reply(office):
+    conv = Conversation(office=office, llm=FakeLLM([(["שבוע טוב! ", "במה אוכל לעזור?"], False)]))
+    conv.add_caller("שלום")
+    assert run(collect(conv)) == "שבוע טוב! במה אוכל לעזור?"
+    assert not conv.ended
